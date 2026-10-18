@@ -5,6 +5,7 @@ import rs.raf.dlsm.common.Keys;
 
 import java.util.Collections;
 import java.util.Iterator;
+import java.util.List;
 import java.util.NavigableMap;
 import java.util.Objects;
 import java.util.Optional;
@@ -27,7 +28,9 @@ import java.util.TreeMap;
  * to this generation, including versions later replaced inside it, so the
  * range matches the WAL that protects the generation.
  *
- * <p>Not thread-safe: guarded by the engine lock (CP1 §13.1).
+ * <p>Not thread-safe: guarded by the engine lock (CP1 §13.1). Rotation
+ * calls {@link #freeze} to turn the generation into an
+ * {@link ImmutableMemTable}; after that no write is ever accepted.
  */
 public final class MemTable {
 
@@ -41,6 +44,7 @@ public final class MemTable {
     private long logicalBytes;
     private long minSequence;
     private long maxSequence;
+    private boolean frozen;
 
     /**
      * @param maxBytes {@code MEMTABLE_MAX_BYTES}; reaching it requests rotation
@@ -65,12 +69,17 @@ public final class MemTable {
     /**
      * Stores a version, replacing the key's previous version if any.
      *
-     * @throws IllegalStateException if the sequence does not increase;
-     *                               the table is then left unchanged
+     * @throws IllegalStateException if the table is frozen or the sequence
+     *                               does not increase; the table is then
+     *                               left unchanged
      */
     public void apply(InternalRecord record) {
         Objects.requireNonNull(record, "record");
 
+        if (frozen) {
+            throw new IllegalStateException(
+                    "Generation " + memtableGeneration + " is frozen");
+        }
         if (!isEmpty() && record.sequence() <= maxSequence) {
             throw new IllegalStateException("Sequence " + record.sequence()
                     + " does not follow " + maxSequence);
@@ -143,5 +152,34 @@ public final class MemTable {
      */
     public boolean rotationRequired() {
         return logicalBytes >= maxBytes;
+    }
+
+    public boolean isFrozen() {
+        return frozen;
+    }
+
+    /**
+     * Freezes this generation for flush (CP1 §10, rotation step 2). From now
+     * on {@link #apply} fails, so the returned view is a stable input.
+     *
+     * @param walSegmentIds the WAL segments whose records are in this
+     *                      generation and that protect it until a manifest
+     *                      covering it is published
+     * @throws IllegalStateException if already frozen or empty
+     */
+    public ImmutableMemTable freeze(List<Long> walSegmentIds) {
+        if (frozen) {
+            throw new IllegalStateException(
+                    "Generation " + memtableGeneration + " is already frozen");
+        }
+        if (isEmpty()) {
+            // Rotation, manual flush and recovery only freeze generations
+            // that hold records; an empty one has nothing to flush.
+            throw new IllegalStateException("Cannot freeze an empty generation");
+        }
+
+        ImmutableMemTable view = new ImmutableMemTable(this, walSegmentIds);
+        frozen = true;
+        return view;
     }
 }
