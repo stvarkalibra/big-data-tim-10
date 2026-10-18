@@ -279,7 +279,16 @@ public interface MaintenanceHost {
     void installCompactionResult(Set<Long> inputTableIds, TableSource output);
     void reportFatalError(StorageException cause);           // npr. IO_ERROR posle preimenovanja manifesta → FAILED
 }
-public interface FlushScheduler { void flushNeeded(); void checkAutoCompaction(); } // Ilija obezbeđuje; ne sme da blokira
+public interface FlushScheduler { void flushNeeded(); void checkAutoCompaction(); default void close() {} } // Ilija obezbeđuje; ne sme da blokira
+// Ulaz za oporavak (Matej poziva na kraju RecoveryProcedure, CP1 §21.1 koraci 10–15):
+public record RecoveredState(long lastUsedSequence,              // max(flushedThroughSequence, najveći ispravan WAL seq)
+                             ImmutableMemTable recoveredGeneration, // replay iznad flushedThrough u generaciju 1, ili null
+                             List<TableSource> tables,             // sve tabele iz manifesta, već validirane
+                             MutationLog activeLog,                // nov, trajan, prazan WAL segment (ID iznad svih starih)
+                             WalFactory walFactory) {}             // pravi naredne segmente pri rotaciji
+static Engine Engine.open(EngineConfig cfg, RecoveredState state,
+                          Function<MaintenanceHost, FlushScheduler> maintenance); // READY; odmah traži flush oporavljene
+                                                                                 // generacije i checkAutoCompaction()
 // Objavljena SSTable kako je engine čita; Kimijev SSTableReader je implementira.
 public interface TableSource {
     SSTableMeta meta();
