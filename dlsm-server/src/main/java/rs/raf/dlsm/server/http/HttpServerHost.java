@@ -5,6 +5,7 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import rs.raf.dlsm.common.ErrorCode;
 import rs.raf.dlsm.common.StorageException;
+import rs.raf.dlsm.common.UncheckedStorageException;
 import rs.raf.dlsm.engine.OpContext;
 import rs.raf.dlsm.log.JsonLog;
 
@@ -136,6 +137,12 @@ public final class HttpServerHost implements AutoCloseable {
         } catch (StorageException e) {
             response = ApiResponse.error(
                     e.code(), e.getMessage(), requestId, storageErrorPartition);
+        } catch (UncheckedStorageException e) {
+            // A storage error carried out of code that cannot throw checked
+            // exceptions (e.g. a Supplier): answer with its real code.
+            StorageException cause = e.getCause();
+            response = ApiResponse.error(
+                    cause.code(), cause.getMessage(), requestId, storageErrorPartition);
         } catch (RuntimeException | Error e) {
             logFailure("HTTP_INTERNAL_ERROR", requestId, e);
             response = ApiResponse.error(ErrorCode.INTERNAL_ERROR,

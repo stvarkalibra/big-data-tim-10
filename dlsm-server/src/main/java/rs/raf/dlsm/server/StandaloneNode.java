@@ -1,6 +1,9 @@
 package rs.raf.dlsm.server;
 
+import rs.raf.dlsm.common.ErrorCode;
 import rs.raf.dlsm.common.Lifecycle;
+import rs.raf.dlsm.common.StorageException;
+import rs.raf.dlsm.common.UncheckedStorageException;
 import rs.raf.dlsm.engine.Engine;
 import rs.raf.dlsm.engine.StorageEngine;
 import rs.raf.dlsm.log.JsonLog;
@@ -8,6 +11,8 @@ import rs.raf.dlsm.server.http.HealthRoutes;
 import rs.raf.dlsm.server.http.HttpServerHost;
 import rs.raf.dlsm.server.http.KvRoutes;
 import rs.raf.dlsm.server.http.Router;
+import rs.raf.dlsm.server.http.StorageStatusRoutes;
+import rs.raf.dlsm.stats.StorageStats;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -25,12 +30,22 @@ public final class StandaloneNode implements AutoCloseable {
 
     private final HttpServerHost adminHost;
     private final HttpServerHost publicHost;
+    /** One instance for the whole node: every module counts into it (CP1 §24). */
+    private final StorageStats stats = new StorageStats();
     private volatile StorageEngine engine;
+    private volatile NodeStatus status;
     private volatile boolean stopping;
 
     private StandaloneNode(ServerConfig config, JsonLog log) throws IOException {
         Router admin = new Router();
         HealthRoutes.register(admin, config.nodeId(), this::lifecycle);
+        // Registered before the admin server starts (the router must not
+        // change while serving); answers 503 until the engine exists.
+        StorageStatusRoutes.register(admin,
+                () -> nodeStatus().snapshot(),
+                () -> nodeStatus().acceptedSequence(),
+                () -> nodeStatus().durableSequence(),
+                stats);
 
         // Each server is started right after it binds: a JDK HttpServer that
         // was created but never started does not release its port on close.
@@ -40,7 +55,9 @@ public final class StandaloneNode implements AutoCloseable {
         try {
             // TODO(recovery): open the durable engine over the data directory;
             // until then the node keeps data in memory only (milestone M1).
-            engine = Engine.openInMemory(config.engineConfig());
+            Engine opened = Engine.openInMemory(config.engineConfig());
+            engine = opened;
+            status = new NodeStatus(config.nodeId(), opened, stats);
 
             Router publicApi = new Router();
             KvRoutes.register(publicApi, engine);
@@ -82,6 +99,20 @@ public final class StandaloneNode implements AutoCloseable {
 
     public StorageEngine engine() {
         return engine;
+    }
+
+    /** The node's shared counters. */
+    public StorageStats stats() {
+        return stats;
+    }
+
+    private NodeStatus nodeStatus() {
+        NodeStatus current = status;
+        if (current == null) {
+            throw new UncheckedStorageException(new StorageException(
+                    ErrorCode.NODE_NOT_READY, "Node is starting"));
+        }
+        return current;
     }
 
     public int publicPort() {
