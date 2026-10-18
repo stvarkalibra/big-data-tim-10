@@ -2,7 +2,11 @@ package rs.raf.dlsm.wal;
 
 import rs.raf.dlsm.common.Bin;
 import rs.raf.dlsm.common.ErrorCode;
+import rs.raf.dlsm.common.InternalRecord;
 import rs.raf.dlsm.common.StorageException;
+
+import java.nio.charset.StandardCharsets;
+import java.util.Objects;
 
 import static rs.raf.dlsm.wal.WalFormat.*;
 
@@ -96,6 +100,44 @@ public final class WalCodec {
             throw headerError("Header segment ID " + segmentId
                     + " does not match file name ID " + expectedSegmentId);
         }
+    }
+
+    // ===== Record frame (FORMAT.md §3.3) =====
+
+    /**
+     * Encodes one mutation as a complete frame of {@code 30 + k + v} bytes.
+     * The record itself already guarantees a valid key, a positive sequence
+     * and a bounded value, so every frame produced here passes decoding.
+     */
+    public static byte[] encodeFrame(InternalRecord record) {
+        Objects.requireNonNull(record, "record");
+
+        byte[] key = record.key().getBytes(StandardCharsets.US_ASCII);
+        byte[] value = record.isTombstone() ? new byte[0] : record.value();
+
+        int total = frameLength(key.length, value.length);
+        byte[] frame = new byte[total];
+
+        Bin.putU32(frame, FRAME_LENGTH_OFFSET, total);
+        Bin.putU32(frame, FRAME_LENGTH_COMPLEMENT_OFFSET,
+                total ^ Bin.U32_MAX);
+        Bin.putU16(frame, FRAME_VERSION_OFFSET, RECORD_VERSION);
+        Bin.putU8(frame, FRAME_KIND_OFFSET, record.kind().code());
+        Bin.putU8(frame, FRAME_RESERVED_OFFSET, 0);
+        Bin.putI64(frame, FRAME_SEQUENCE_OFFSET, record.sequence());
+        Bin.putU16(frame, FRAME_KEY_LENGTH_OFFSET, key.length);
+        Bin.putU32(frame, FRAME_VALUE_LENGTH_OFFSET, value.length);
+
+        System.arraycopy(key, 0, frame, FRAME_KEY_OFFSET, key.length);
+        System.arraycopy(value, 0, frame,
+                FRAME_KEY_OFFSET + key.length, value.length);
+
+        // CRC covers bytes 8..(25 + k + v): version through the last value byte.
+        int crcOffset = total - FRAME_CRC_BYTES;
+        Bin.putCrc32c(frame, FRAME_CRC_START,
+                crcOffset - FRAME_CRC_START, crcOffset);
+
+        return frame;
     }
 
     private static StorageException headerError(String message) {
