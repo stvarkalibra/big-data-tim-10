@@ -123,6 +123,67 @@ Prvih 8 bajtova (dužina i njen komplement) čine **zaštićeno zaglavlje okvira
 
 **`DELETE` i prazan `PUT`** imaju isti raspored i istu dužinu (`v = 0`); razlikuje ih samo polje vrsta. Tombstone je pravi zapis sa sopstvenim rednim brojem, ne prazna vrednost (CP1 I8). Kodovi vrste `1`/`2` isti su kao u SSTable bloku podataka.
 
+### 3.4 Validacija i nepotpun završetak
+
+Čitanje jednog segmenta daje tačno jedan od tri ishoda (CP1 §16.4):
+
+| Ishod | Značenje | Šta se prijavljuje |
+|---|---|---|
+| `VALID` | Zaglavlje i svi okviri su ispravni, poslednji okvir se završava tačno na EOF-u. Segment sa samo zaglavljem je `VALID` bez zapisa. | lista zapisa |
+| `TORN_TAIL` | Svi okviri su ispravni osim poslednjeg, koji je samo prefiks: dopisivanje je prekinuto pre nego što je okvir bio kompletan. | lista ispravnih zapisa, offset početka nepotpunog okvira, dužina fajla |
+| `CORRUPT` | Zaglavlje ili neki kompletan okvir ne prolazi proveru. | offset i kategorija prve greške |
+
+#### Algoritam čitanja okvira
+
+Neka je `S` fizička dužina fajla, a `p` offset na kome počinje sledeći okvir (prvi je na `p = 24`). Dok je `p < S`, za svaki okvir se izvršavaju koraci tačno ovim redom. Prvi korak koji ne uspe određuje ishod i čitanje staje; bajtovi iza greške se nikad ne preskaču niti tumače (CP1 §16.4).
+
+| Korak | Provera | Ako ne uspe |
+|---:|---|---|
+| 1 | Ostalo je najmanje 8 bajtova: `S - p ≥ 8`. | `TORN_TAIL` na offset-u `p` (EOF preseca zaštićeno zaglavlje). |
+| 2 | Komplement je ispravan: bajtovi `4..7` = `totalFrameLength XOR 0xFFFFFFFF`. | `CORRUPT`, `WAL_LENGTH_GUARD`. |
+| 3 | `totalFrameLength` je u opsegu `31..262302`. | `CORRUPT`, `WAL_LENGTH_GUARD`. |
+| 4 | Ceo okvir staje u fajl: `p + totalFrameLength ≤ S`. | `TORN_TAIL` na offset-u `p` (ispravno zaštićeno zaglavlje, a okvir prelazi EOF). |
+| 5 | Tek sada se alocira i čita `totalFrameLength` bajtova. Verzija zapisa je `1`, rezervisani bajt je `0`, vrsta je `1` ili `2`. | `CORRUPT`, `WAL_FRAME`. |
+| 6 | Unutrašnje dužine objašnjavaju okvir: `k` je u `1..128`, `v` u `0..262144` (`0` za `DELETE`) i `30 + k + v = totalFrameLength`. | `CORRUPT`, `WAL_FRAME`. |
+| 7 | Bajtovi ključa čine važeći ključ projekta (§1). | `CORRUPT`, `WAL_FRAME`. |
+| 8 | CRC32C nad bajtovima `8..(25 + k + v)` jednak je sačuvanom CRC-u. | `CORRUPT`, `CHECKSUM`. |
+| 9 | `mutationSequence` je pozitivan i strogo veći od rednog broja prethodnog ispravnog zapisa, i u ovom i u prethodnim segmentima (§3.5). | `CORRUPT`, `WAL_SEQUENCE_ORDER`. |
+| 10 | Okvir je ispravan; `p` se pomera za `totalFrameLength`. | — |
+
+Redosled je namerno ovakav (CP1 §16.3.1): dužina se proverava pre alokacije, a strukturne provere pre CRC-a. Redni broj se proverava posle CRC-a, pa se oštećen redni broj prijavljuje kao `CHECKSUM`, a ne kao loš redosled.
+
+#### Kada je završetak nepotpun, a kada oštećen
+
+Završetak je nepotpun **samo** u dva slučaja iz koraka 1 i 4: kada EOF preseca zaštićeno zaglavlje, ili kada je zaštićeno zaglavlje kompletno i ispravno, ali deklarisani okvir prelazi EOF. Sve ostalo je oštećenje, i kada je pogođen poslednji okvir u fajlu: kompletan okvir sa lošim CRC-om nikad se ne odseca, jer je možda već potvrđen klijentu (CP1 §16.4).
+
+Posledice za testove:
+
+- **Presek bilo gde u okviru** (`wal.after-record-prefix`, CP1-WAL-002): unutar prvih 8 bajtova daje `TORN_TAIL` u koraku 1, a posle njih u koraku 4. U oba slučaja offset nepotpunog okvira je dužina fajla pre tog dopisivanja.
+- **Promena jednog bajta u zaštićenom zaglavlju** (CP1-WAL-003 podslučaj c): komplement više ne odgovara, pa korak 2 prijavljuje `WAL_LENGTH_GUARD` **pre** provere EOF-a u koraku 4. Zato oštećena dužina nikad ne može da se predstavi kao nepotpun završetak, čak ni kada pokazuje iza kraja fajla.
+- **Promena jednog bajta u ostatku okvira** (podslučajevi a i b): korak 5, 6 ili 7 prijavljuje `WAL_FRAME` kada se pokvari struktura, a inače korak 8 prijavljuje `CHECKSUM`.
+
+#### Gde sme da postoji nepotpun završetak
+
+Nepotpun završetak je dozvoljen samo u **poslednjem okviru celog WAL-a**: nijedan segment sa većim ID-jem ne sme da sadrži okvir. Prekinuto dopisivanje znači da je proces pao ili prešao u `FAILED` i više ništa nije dopisao, a oporavak odseca završetak pre nego što stvori nov segment (CP1 §21.1, koraci 9 i 12). Nepotpun okvir iza koga u kasnijem segmentu postoji okvir zato ne može nastati padom; prijavljuje se kao `CORRUPT`, `WAL_FRAME`, na offset-u nepotpunog okvira. Kasniji segmenti sa samo zaglavljem su dozvoljeni.
+
+Oporavak odseca nepotpun završetak tačno na offset nepotpunog okvira, odmah radi force skraćenog fajla i jednom uvećava `walTornTailsTruncated` (CP1 §21.1, korak 9). Posle toga je segment `VALID`, pa ponovljeni oporavak ne odseca ništa više (CP1-WAL-008).
+
+#### Kategorije grešaka WAL-a
+
+Stabilne vrednosti za `StorageException.category()`, `lastFatalError.code` i logove (`docs/ODLUKE.md`, 18.10.2026.):
+
+| Kategorija | Kada |
+|---|---|
+| `WAL_HEADER` | Zaglavlje segmenta: kraće od 24 bajta, loš CRC, magic, verzija, rezervisano polje ili ID različit od imena fajla (§3.2). |
+| `WAL_LENGTH_GUARD` | Zaštićeno zaglavlje okvira: loš komplement ili dužina van `31..262302` (koraci 2–3). |
+| `WAL_FRAME` | Struktura kompletnog okvira: verzija, rezervisani bajt, vrsta, unutrašnje dužine ili ključ (koraci 5–7), kao i nepotpun okvir koji nije na kraju WAL-a. |
+| `CHECKSUM` | Kompletan okvir sa ispravnom strukturom i lošim CRC-om (korak 8). |
+| `WAL_SEQUENCE_ORDER` | Redni broj nije pozitivan ili ne raste strogo (korak 9, §3.5). |
+
+### 3.5 Redosled kroz više segmenata
+
+Segmenti se čitaju po rastućem ID-ju, nikad po redosledu listanja direktorijuma niti po vremenu izmene. Redni brojevi strogo rastu kroz **ceo** WAL: prvi zapis u segmentu mora imati redni broj veći od poslednjeg zapisa u prethodnom segmentu koji ima zapise. Praznine u ID-jevima segmenata i u rednim brojevima su dozvoljene; jednak ili manji redni broj nije, i oporavak ga nikad ne „popravlja“ sortiranjem (CP1-WAL-007).
+
 ## SSTable — Bloom Filter Format (Version 1)
 
 ### Parameters
