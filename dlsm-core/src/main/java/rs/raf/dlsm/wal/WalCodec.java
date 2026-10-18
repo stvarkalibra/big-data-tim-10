@@ -3,9 +3,12 @@ package rs.raf.dlsm.wal;
 import rs.raf.dlsm.common.Bin;
 import rs.raf.dlsm.common.ErrorCode;
 import rs.raf.dlsm.common.InternalRecord;
+import rs.raf.dlsm.common.Keys;
+import rs.raf.dlsm.common.Kind;
 import rs.raf.dlsm.common.StorageException;
 
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.Objects;
 
 import static rs.raf.dlsm.wal.WalFormat.*;
@@ -174,6 +177,102 @@ public final class WalCodec {
             throw lengthGuardError("Frame length " + total + " outside ["
                     + MIN_FRAME_BYTES + ", " + MAX_FRAME_BYTES + "]", e);
         }
+    }
+
+    /**
+     * Steps 5–8 of FORMAT.md §3.4 on one complete frame: structure, then
+     * inner lengths, then the key, and only at the end the CRC. A frame that
+     * passes is returned as a record; strictly increasing order across
+     * frames is the reader's job (step 9).
+     *
+     * @param frame exactly {@code totalFrameLength} bytes, starting with the
+     *              guarded header
+     */
+    public static InternalRecord decodeFrame(byte[] frame) throws StorageException {
+        int total = checkFrameGuard(frame, 0);
+        if (frame.length != total) {
+            throw new IllegalArgumentException("Frame buffer has " + frame.length
+                    + " bytes, guarded header declares " + total);
+        }
+
+        // Step 5: version, reserved byte, kind.
+        int version = Bin.getU16(frame, FRAME_VERSION_OFFSET);
+        if (version != RECORD_VERSION) {
+            throw frameError("Unsupported record version " + version);
+        }
+
+        if (Bin.getU8(frame, FRAME_RESERVED_OFFSET) != 0) {
+            throw frameError("Nonzero reserved record byte");
+        }
+
+        int kindCode = Bin.getU8(frame, FRAME_KIND_OFFSET);
+        Kind kind;
+        if (kindCode == Kind.PUT.code()) {
+            kind = Kind.PUT;
+        } else if (kindCode == Kind.DELETE.code()) {
+            kind = Kind.DELETE;
+        } else {
+            throw frameError("Unknown record kind " + kindCode);
+        }
+
+        // Step 6: inner lengths must explain totalFrameLength exactly.
+        int keyLength = Bin.getU16(frame, FRAME_KEY_LENGTH_OFFSET);
+        long valueLength = Bin.getU32(frame, FRAME_VALUE_LENGTH_OFFSET);
+
+        if (keyLength < 1 || keyLength > Keys.MAX_LENGTH) {
+            throw frameError("Key length " + keyLength + " outside [1, "
+                    + Keys.MAX_LENGTH + "]");
+        }
+
+        if (valueLength > InternalRecord.MAX_VALUE_BYTES) {
+            throw frameError("Value length " + valueLength + " above "
+                    + InternalRecord.MAX_VALUE_BYTES);
+        }
+
+        if (kind == Kind.DELETE && valueLength != 0) {
+            throw frameError("DELETE with value length " + valueLength);
+        }
+
+        if (frameLength(keyLength, (int) valueLength) != total) {
+            throw frameError("Inner lengths k=" + keyLength + ", v=" + valueLength
+                    + " do not explain frame length " + total);
+        }
+
+        // Step 7: key bytes. ISO-8859-1 maps every byte to one char, so a
+        // non-ASCII byte becomes a char Keys rejects instead of being replaced.
+        String key = new String(frame, FRAME_KEY_OFFSET, keyLength,
+                StandardCharsets.ISO_8859_1);
+        if (!Keys.isValid(key)) {
+            throw frameError("Invalid key bytes");
+        }
+
+        // Step 8: CRC over bytes 8..(25 + k + v).
+        int crcOffset = total - FRAME_CRC_BYTES;
+        if (Bin.getU32(frame, crcOffset)
+                != Bin.crc32c(frame, FRAME_CRC_START, crcOffset - FRAME_CRC_START)) {
+            throw new StorageException(ErrorCode.STORAGE_IO, CATEGORY_CHECKSUM,
+                    "Record checksum mismatch");
+        }
+
+        // Step 9 (first half): a sequence must be positive; ordering across
+        // frames is checked by the reader.
+        long sequence = Bin.getI64(frame, FRAME_SEQUENCE_OFFSET);
+        if (sequence <= 0) {
+            throw new StorageException(ErrorCode.STORAGE_IO,
+                    CATEGORY_SEQUENCE_ORDER, "Nonpositive sequence " + sequence);
+        }
+
+        if (kind == Kind.DELETE) {
+            return InternalRecord.delete(key, sequence);
+        }
+
+        int valueStart = FRAME_KEY_OFFSET + keyLength;
+        return InternalRecord.put(key, sequence,
+                Arrays.copyOfRange(frame, valueStart, valueStart + (int) valueLength));
+    }
+
+    private static StorageException frameError(String message) {
+        return new StorageException(ErrorCode.STORAGE_IO, CATEGORY_FRAME, message);
     }
 
     private static StorageException lengthGuardError(
