@@ -20,6 +20,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.function.Function;
 
 /**
  * The storage engine core: ordered mutations, two in-memory generations and
@@ -61,8 +62,6 @@ public final class Engine implements StorageEngine, MaintenanceHost {
     private final SequenceAllocator sequences;
     private final Object failureLock = new Object();
     private volatile FlushScheduler flushScheduler = FlushScheduler.NONE;
-    /** Run by {@link #close()}, e.g. to stop helper threads. */
-    private final List<Runnable> closeActions = new java.util.concurrent.CopyOnWriteArrayList<>();
 
     /** The active pair (CP1 §10): changed only together, under the write lock. */
     private MemTable active;
@@ -124,14 +123,59 @@ public final class Engine implements StorageEngine, MaintenanceHost {
      */
     public static Engine openInMemory(EngineConfig config) {
         InMemoryWal wal = new InMemoryWal();
-        Engine engine = new Engine(config, wal, wal.createSegment(OpContext.background()),
-                SequenceAllocator.forNewDatabase(), EngineView.EMPTY);
-
         // Frozen generations are "flushed" into in-memory tables, so the
         // frozen slot frees up and backpressure ends as with a real flush.
-        InMemoryFlusher flusher = new InMemoryFlusher(engine);
-        engine.setFlushScheduler(flusher);
-        engine.closeActions.add(flusher::close);
+        return open(config,
+                RecoveredState.empty(wal.createSegment(OpContext.background()), wal),
+                InMemoryFlusher::new);
+    }
+
+    /**
+     * Opens the engine over the state startup recovery rebuilt (CP1 §21.1,
+     * steps 10–15): the engine is {@code READY} when this returns.
+     *
+     * <p>{@code maintenance} creates the flush worker from the engine,
+     * which is its {@link MaintenanceHost}. If recovery produced a frozen
+     * generation it is handed to the worker at once, so it is flushed
+     * right after {@code READY} (plan §6.2, allowed by CP1 §21.1); and the
+     * worker is asked to check the automatic compaction threshold
+     * (CP1 §20.1). {@link #close()} closes the worker.
+     *
+     * @throws IllegalArgumentException if the state could make the engine
+     *                                  reuse a sequence or a WAL segment
+     */
+    public static Engine open(EngineConfig config, RecoveredState state,
+                              Function<MaintenanceHost, FlushScheduler> maintenance) {
+        Objects.requireNonNull(config, "config");
+        Objects.requireNonNull(state, "state");
+        Objects.requireNonNull(maintenance, "maintenance");
+
+        EngineView view = new EngineView(state.recoveredGeneration(), state.tables());
+        if (view.maxSequence() > state.lastUsedSequence()) {
+            throw new IllegalArgumentException("lastUsedSequence " + state.lastUsedSequence()
+                    + " is below recovered sequence " + view.maxSequence());
+        }
+        if (state.recoveredGeneration() != null) {
+            List<Long> recoveredSegments = state.recoveredGeneration().walSegmentIds();
+            long newestRecovered = recoveredSegments.get(recoveredSegments.size() - 1);
+            if (state.activeLog().segmentId() <= newestRecovered) {
+                // CP1 §21.1 step 12: never append to a previously used segment.
+                throw new IllegalArgumentException("Active WAL segment "
+                        + state.activeLog().segmentId() + " is not newer than recovered segment "
+                        + newestRecovered);
+            }
+        }
+
+        Engine engine = new Engine(config, state.walFactory(), state.activeLog(),
+                SequenceAllocator.after(state.lastUsedSequence()), view);
+        FlushScheduler scheduler = Objects.requireNonNull(
+                maintenance.apply(engine), "maintenance worker");
+        engine.setFlushScheduler(scheduler);
+
+        if (state.recoveredGeneration() != null) {
+            scheduler.flushNeeded();
+        }
+        scheduler.checkAutoCompaction();
         return engine;
     }
 
@@ -643,10 +687,8 @@ public final class Engine implements StorageEngine, MaintenanceHost {
 
     @Override
     public void close() {
-        // The in-memory engine owns no files yet, only helper threads.
-        for (Runnable action : closeActions) {
-            action.run();
-        }
+        // Stops the maintenance worker; the engine itself owns no files yet.
+        flushScheduler.close();
     }
 
     /**
