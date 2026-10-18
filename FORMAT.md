@@ -1,3 +1,51 @@
+# FORMAT.md — tačan format trajnih fajlova
+
+Ovaj fajl opisuje tačne bajtove svih fajlova koje mehanizam upisuje na disk (CP1 §15, §31.2). Pisac, čitalac, inspektori i nezavisni fixture alati za testove moraju koristiti **isti** opis; ako se kod i ovaj fajl razlikuju, to je greška koju treba ispraviti u istom PR-u (plan §5.3).
+
+| Deo | Odeljak | Vlasnik |
+|---|---|---|
+| Zajednička pravila, raspored direktorijuma | §1, §2 | Matej (urednik fajla) |
+| WAL segment i okvir zapisa | §3 | Matej |
+| `node.json` | §4 | Matej |
+| SSTable (Bloom filter, blok podataka, retki indeks) | odeljci „SSTable — …“ ispod | Kimi |
+| `MANIFEST.json` | dodaje se | Ilija |
+
+Izmena bilo kog formata je izmena zajedničkog ugovora: najava u grupi, obavezan PR, saglasnost vlasnika i red u `docs/ODLUKE.md` (plan §5.3).
+
+## 1. Zajednička pravila binarnog formata
+
+Važe za svaki binarni format u ovom fajlu (CP1 §15). Zajednički kod za njih je `rs.raf.dlsm.common.Bin`.
+
+| Pravilo | Izbor tima |
+|---|---|
+| Redosled bajtova | **big-endian** za sve višebajtne cele brojeve. |
+| Oznake tipova | `u8`, `u16`, `u32` — neoznačeni celi brojevi od 1, 2 i 4 bajta; `i64` — 64-bitni broj u komplementu dvojke. Redni brojevi mutacija i svi identifikatori (`walSegmentId`, `tableId`) upisuju se kao `i64`, ali su uvek u opsegu `1..2^63-1`. |
+| Kontrolna suma | **CRC32C** (Castagnoli, `java.util.zip.CRC32C`), upisana kao `u32`. Svaki format navodi tačan opseg bajtova koji pokriva. Kontrolna vrednost: CRC32C ASCII niza `123456789` je `0xE3069283`. |
+| Identifikacija fajla | Fiksni magic bajtovi i eksplicitna verzija formata; čitalac odbija nepoznatu verziju. |
+| Polja promenljive dužine | Svakom prethodi dužina sa gornjom granicom. Dužina se proverava **pre** alokacije memorije (`Bin.checkLength`), a deklarisani opseg nikad ne sme da izađe van fizičkog fajla (`Bin.fitsWithin`). |
+| Ključ | `1..128` ASCII bajtova iz skupa `[A-Za-z0-9._~-]`, bez terminatora i bez dopune. |
+| Vrednost | `0..262144` bajta čiji se sadržaj ne tumači; prazna vrednost (`0` bajtova) nije isto što i tombstone. |
+| Zabranjeno | Java serijalizacija objekata, `BitSet` kao format na disku i bilo koji format zavisan od rasporeda klase u memoriji (CP1 §15). |
+
+## 2. Raspored direktorijuma i imena fajlova
+
+Raspored trajnog volumena (CP1 §14):
+
+```text
+/var/lib/dlsm/
+├── LOCK                      # brava procesa, sadržaj se ne čita
+├── node.json                 # identitet čvora, §4
+└── lsm/
+    ├── MANIFEST.json         # merodavna lista SSTable tabela
+    ├── wal/wal-<id>.log      # WAL segmenti, §3
+    ├── sst/sst-<id>.sst      # SSTable tabele
+    └── tmp/                  # privremeni fajlovi, nikad izvor objavljenog stanja
+```
+
+- `<id>` je nenegativan decimalni broj sa tačno **20 cifara**, dopunjen nulama sleva. Primer: segment `1` je `wal-00000000000000000001.log`.
+- Ime koje ne odgovara tačno obrascu nije „sintaksno ispravan“ ID i ne učestvuje u dodeli sledećeg ID-ja (CP1 §16.1, §18.3).
+- WAL i SSTable ID-jevi su odvojeni prostori imena; praznine u ID-jevima su dozvoljene, ponovna upotreba nije.
+- Privremeni i konačni fajlovi su na istom sistemu fajlova, pa je premeštanje iz `tmp/` atomsko.
 
 ## SSTable — Bloom Filter Format (Version 1)
 
