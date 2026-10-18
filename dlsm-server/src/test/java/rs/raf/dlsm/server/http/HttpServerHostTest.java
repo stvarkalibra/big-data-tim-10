@@ -64,6 +64,11 @@ class HttpServerHostTest {
                 })
                 .add("GET", "/error", (req, ctx) -> {
                     throw new NoClassDefFoundError("com/example/Missing");
+                })
+                .add("GET", "/unchecked-storage", (req, ctx) -> {
+                    throw new rs.raf.dlsm.common.UncheckedStorageException(
+                            new StorageException(ErrorCode.DEADLINE_EXCEEDED,
+                                    "Status deadline expired"));
                 });
 
         InetSocketAddress any = new InetSocketAddress(
@@ -218,6 +223,15 @@ class HttpServerHostTest {
 
         // The server keeps serving afterwards.
         assertEquals(200, send(publicHost, "GET", "/echo/a", "err-2", null).statusCode());
+    }
+
+    @Test
+    void uncheckedStorageExceptionKeepsItsCode() throws Exception {
+        HttpResponse<String> r = send(adminHost, "GET", "/unchecked-storage", null, null);
+
+        assertEquals(504, r.statusCode());
+        assertEquals("DEADLINE_EXCEEDED", json(r).get("code").asText());
+        assertEquals("Status deadline expired", json(r).get("message").asText());
     }
 
     @Test
