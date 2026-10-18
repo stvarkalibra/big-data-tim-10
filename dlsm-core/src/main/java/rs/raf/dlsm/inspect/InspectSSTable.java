@@ -28,11 +28,26 @@ public final class InspectSSTable {
         Objects.requireNonNull(file, "file");
         Objects.requireNonNull(expected, "expected");
 
-        // Potpuna provera svih blokova, indeksa,
-        // Bloom filtera, footera i metapodataka.
-        SSTableValidator.validateFully(file, expected);
+        try {
+            return inspectValidated(file, expected);
+        } catch (SSTableValidator.ValidationException e) {
+            throw e;
+        } catch (IllegalArgumentException
+                 | IndexOutOfBoundsException e) {
 
-        SSTableReader reader = SSTableReader.open(file, expected);
+            throw new SSTableValidator.ValidationException(
+                    SSTableValidator.Category.DATA_BLOCK,
+                    "SSTable inspection failed: " + e.getMessage(),
+                    e
+            );
+        }
+    }
+
+    private static Map<String, Object> inspectValidated(
+            byte[] file, SSTableMeta expected) {
+
+        SSTableReader reader =
+                SSTableReader.open(file, expected);
 
         int footerStart =
                 file.length - SSTableWriter.FOOTER_BYTES;
@@ -60,7 +75,8 @@ public final class InspectSSTable {
                 Math.toIntExact(indexOffset + indexLength)
         );
 
-        SparseIndex index = SparseIndex.deserialize(indexBytes);
+        SparseIndex index =
+                SparseIndex.deserialize(indexBytes);
 
         Map<String, Object> result = new LinkedHashMap<>();
 
@@ -73,7 +89,8 @@ public final class InspectSSTable {
         result.put("footerCrcStatus", "VALID");
         result.put("indexCrcStatus", "VALID");
         result.put("bloomCrcStatus", "VALID");
-        result.put("headerMagic", String.format("0x%08X", headerMagic));
+        result.put("headerMagic",
+                String.format("0x%08X", headerMagic));
         result.put("headerTableId", headerTableId);
 
         result.put("sizeBytes", expected.sizeBytes());
@@ -87,22 +104,30 @@ public final class InspectSSTable {
 
         Map<String, Object> regions = new LinkedHashMap<>();
 
-        regions.put("data", region(dataOffset, dataLength));
-        regions.put("index", region(indexOffset, indexLength));
-        regions.put("bloom", region(bloomOffset, bloomLength));
-        regions.put("footer", region(
-                footerStart, SSTableWriter.FOOTER_BYTES));
+        regions.put("data",
+                region(dataOffset, dataLength));
+        regions.put("index",
+                region(indexOffset, indexLength));
+        regions.put("bloom",
+                region(bloomOffset, bloomLength));
+        regions.put("footer",
+                region(footerStart, SSTableWriter.FOOTER_BYTES));
 
         result.put("regions", regions);
 
-        List<Map<String, Object>> indexEntries = new ArrayList<>();
-        List<Map<String, Object>> blocks = new ArrayList<>();
-        List<Map<String, Object>> records = new ArrayList<>();
+        List<Map<String, Object>> indexEntries =
+                new ArrayList<>();
+        List<Map<String, Object>> blocks =
+                new ArrayList<>();
+        List<Map<String, Object>> records =
+                new ArrayList<>();
 
         int blockNumber = 0;
 
         for (SparseIndex.Entry entry : index.entries()) {
-            Map<String, Object> indexItem = new LinkedHashMap<>();
+
+            Map<String, Object> indexItem =
+                    new LinkedHashMap<>();
 
             indexItem.put("firstKey", entry.firstKey());
             indexItem.put("offset", entry.offset());
@@ -113,13 +138,15 @@ public final class InspectSSTable {
             byte[] blockBytes = Arrays.copyOfRange(
                     file,
                     Math.toIntExact(entry.offset()),
-                    Math.toIntExact(entry.offset() + entry.length())
+                    Math.toIntExact(
+                            entry.offset() + entry.length())
             );
 
             List<BlockCodec.Record> decoded =
                     BlockCodec.decode(blockBytes);
 
-            Map<String, Object> block = new LinkedHashMap<>();
+            Map<String, Object> block =
+                    new LinkedHashMap<>();
 
             block.put("blockNumber", blockNumber);
             block.put("offset", entry.offset());
@@ -133,7 +160,9 @@ public final class InspectSSTable {
             blocks.add(block);
 
             for (BlockCodec.Record record : decoded) {
-                Map<String, Object> item = new LinkedHashMap<>();
+
+                Map<String, Object> item =
+                        new LinkedHashMap<>();
 
                 item.put("blockNumber", blockNumber);
                 item.put("key", record.key());
@@ -161,7 +190,9 @@ public final class InspectSSTable {
     private static Map<String, Object> region(
             long offset, long length) {
 
-        Map<String, Object> result = new LinkedHashMap<>();
+        Map<String, Object> result =
+                new LinkedHashMap<>();
+
         result.put("offset", offset);
         result.put("length", length);
 
