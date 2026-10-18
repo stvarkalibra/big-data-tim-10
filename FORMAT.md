@@ -184,6 +184,84 @@ Stabilne vrednosti za `StorageException.category()`, `lastFatalError.code` i log
 
 Segmenti se čitaju po rastućem ID-ju, nikad po redosledu listanja direktorijuma niti po vremenu izmene. Redni brojevi strogo rastu kroz **ceo** WAL: prvi zapis u segmentu mora imati redni broj veći od poslednjeg zapisa u prethodnom segmentu koji ima zapise. Praznine u ID-jevima segmenata i u rednim brojevima su dozvoljene; jednak ili manji redni broj nije, i oporavak ga nikad ne „popravlja“ sortiranjem (CP1-WAL-007).
 
+### 3.6 Primer: kompletan segment sa tri zapisa
+
+Fajl `lsm/wal/wal-00000000000000000001.log` dužine **129 bajtova** sadrži zaglavlje segmenta `1` i tri zapisa:
+
+| Offset u fajlu | Sadržaj | Dužina |
+|---:|---|---:|
+| `0` | zaglavlje segmenta, ID `1` | `24` |
+| `24` | `PUT(alpha, "A")`, redni broj `1` | `36` |
+| `60` | `DELETE(beta)`, redni broj `2` | `34` |
+| `94` | `PUT(gamma, "")` (prazna vrednost), redni broj `3` | `35` |
+
+Bajtovi su izračunati nezavisnim programom (JDK `ByteBuffer` i `CRC32C`, bez produkcionog koda). Svi brojevi su heksadecimalni.
+
+**Zaglavlje segmenta** (offset `0`, 24 bajta):
+
+| Bajtovi | Heks | Polje | Vrednost |
+|---|---|---|---|
+| `0..7` | `4C 53 4D 57 41 4C 30 31` | magic | `LSMWAL01` |
+| `8..9` | `00 01` | verzija formata | `1` |
+| `10..11` | `00 00` | rezervisano | `0` |
+| `12..19` | `00 00 00 00 00 00 00 01` | ID segmenta | `1` |
+| `20..23` | `E8 56 78 A9` | CRC32C bajtova `0..19` | `0xE85678A9` |
+
+**`PUT(alpha, "A")`, redni broj 1** (offset u fajlu `24`, `k = 5`, `v = 1`, `totalFrameLength = 30 + 5 + 1 = 36`). Offset-i su relativni u odnosu na početak okvira:
+
+| Bajtovi | Heks | Polje | Vrednost |
+|---|---|---|---|
+| `0..3` | `00 00 00 24` | `totalFrameLength` | `36` |
+| `4..7` | `FF FF FF DB` | komplement | `0x24 XOR 0xFFFFFFFF` |
+| `8..9` | `00 01` | verzija zapisa | `1` |
+| `10` | `01` | vrsta | `PUT` |
+| `11` | `00` | rezervisano | `0` |
+| `12..19` | `00 00 00 00 00 00 00 01` | `mutationSequence` | `1` |
+| `20..21` | `00 05` | `k` | `5` |
+| `22..25` | `00 00 00 01` | `v` | `1` |
+| `26..30` | `61 6C 70 68 61` | ključ | `alpha` |
+| `31` | `41` | vrednost | `A` |
+| `32..35` | `F2 20 F3 D8` | CRC32C bajtova `8..31` | `0xF220F3D8` |
+
+**`DELETE(beta)`, redni broj 2** (offset u fajlu `60`, `k = 4`, `v = 0`, 34 bajta). Razlike u odnosu na `PUT`: vrsta je `02`, `v` je `0` i nema bajtova vrednosti.
+
+```text
+00 00 00 22  FF FF FF DD  00 01  02  00  00 00 00 00 00 00 00 02  00 04  00 00 00 00  62 65 74 61  18 19 3F 8C
+dužina=34    komplement   ver=1  DEL rez redni broj = 2           k=4    v=0          "beta"       CRC
+```
+
+**`PUT(gamma, "")`, redni broj 3** (offset u fajlu `94`, `k = 5`, `v = 0`, 35 bajtova). Ima isti oblik kao `DELETE`; prazna vrednost se od tombstone-a razlikuje **samo** po bajtu vrste (`01`).
+
+```text
+00 00 00 23  FF FF FF DC  00 01  01  00  00 00 00 00 00 00 00 03  00 05  00 00 00 00  67 61 6D 6D 61  7E 1E 14 BF
+dužina=35    komplement   ver=1  PUT rez redni broj = 3           k=5    v=0          "gamma"         CRC
+```
+
+**Ceo fajl** (129 bajtova, 16 po redu):
+
+```text
+00000000  4C 53 4D 57 41 4C 30 31 00 01 00 00 00 00 00 00
+00000010  00 00 00 01 E8 56 78 A9 00 00 00 24 FF FF FF DB
+00000020  00 01 01 00 00 00 00 00 00 00 00 01 00 05 00 00
+00000030  00 01 61 6C 70 68 61 41 F2 20 F3 D8 00 00 00 22
+00000040  FF FF FF DD 00 01 02 00 00 00 00 00 00 00 00 02
+00000050  00 04 00 00 00 00 62 65 74 61 18 19 3F 8C 00 00
+00000060  00 23 FF FF FF DC 00 01 01 00 00 00 00 00 00 00
+00000070  00 03 00 05 00 00 00 00 67 61 6D 6D 61 7E 1E 14
+00000080  BF
+```
+
+**Šta bi čitanje (§3.4) prijavilo za izmenjene kopije ovog fajla:**
+
+| Izmena | Ishod | Zašto |
+|---|---|---|
+| bez izmene | `VALID`, tri zapisa | poslednji okvir se završava tačno na EOF-u (`94 + 35 = 129`) |
+| skraćen na `98` bajtova | `TORN_TAIL` na `94` | posle offset-a `94` ostala su 4 bajta, manje od 8 (korak 1) |
+| skraćen na `120` bajtova | `TORN_TAIL` na `94` | zaštićeno zaglavlje je ispravno, ali `94 + 35 > 120` (korak 4) |
+| bajt `97` promenjen iz `23` u `22` | `CORRUPT`, `WAL_LENGTH_GUARD` na `94` | dužina `34` ne odgovara komplementu `FF FF FF DC` (korak 2) |
+| bajt `55` (vrednost `A`) promenjen iz `41` u `42` | `CORRUPT`, `CHECKSUM` na `24` | struktura je ispravna, CRC nije (korak 8) |
+| bajt `20` (CRC zaglavlja) promenjen | `CORRUPT`, `WAL_HEADER` na `0` | CRC zaglavlja segmenta ne odgovara (§3.2) |
+
 ## SSTable — Bloom Filter Format (Version 1)
 
 ### Parameters
