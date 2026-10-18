@@ -3,6 +3,7 @@ package rs.raf.dlsm.stats;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -44,7 +45,7 @@ class StandaloneStatusBuilderTest {
             stats.put(name, 0L);
         }
 
-        var tables = new java.util.ArrayList<StatusBuilder.Table>();
+        var tables = new ArrayList<StatusBuilder.Table>();
 
         for (int i = 1; i <= tableCount; i++) {
             tables.add(new StatusBuilder.Table(
@@ -62,7 +63,8 @@ class StandaloneStatusBuilderTest {
         return new StatusBuilder.Snapshot(
                 "standalone",
                 lifecycle,
-                backpressure ? "BACKPRESSURED" : "SERVING",
+                backpressure ? "BACKPRESSURED"
+                        : "SERVING",
                 backpressure,
                 backpressure ? 2 : 0,
                 null,
@@ -85,6 +87,7 @@ class StandaloneStatusBuilderTest {
     @SuppressWarnings("unchecked")
     private Map<String, Object> partition(
             Map<String, Object> status) {
+
         return ((List<Map<String, Object>>)
                 status.get("partitions")).get(0);
     }
@@ -92,6 +95,7 @@ class StandaloneStatusBuilderTest {
     @SuppressWarnings("unchecked")
     private Map<String, Object> storage(
             Map<String, Object> status) {
+
         return (Map<String, Object>)
                 status.get("standaloneStorage");
     }
@@ -172,16 +176,55 @@ class StandaloneStatusBuilderTest {
     }
 
     @Test
-    void rejectsDurableSequenceAboveAccepted() {
+    void rejectsDurableSequenceAboveAcceptedWhenReady() {
         assertThrows(IllegalArgumentException.class,
                 () -> StandaloneStatusBuilder.build(
-                        snapshot("READY", false, 0), 40, 41));
+                        snapshot("READY", false, 0),
+                        40, 41));
     }
 
     @Test
-    void rejectsNegativeSequences() {
+    void allowsDurableSequenceAboveAcceptedWhenFailed() {
+        var status = StandaloneStatusBuilder.build(
+                snapshot("FAILED", false, 0),
+                40, 41
+        );
+
+        var partition = partition(status);
+
+        assertEquals("FAILED", status.get("lifecycle"));
+        assertEquals(false, partition.get("ready"));
+        assertEquals(40L,
+                partition.get("lastAcceptedSequence"));
+        assertEquals(41L,
+                partition.get("lastDurableSequence"));
+    }
+
+    @Test
+    void allowsDurableSequenceAboveAcceptedDuringRecovery() {
+        var status = StandaloneStatusBuilder.build(
+                snapshot("RECOVERING", false, 0),
+                40, 41
+        );
+
+        assertEquals(false, partition(status).get("ready"));
+        assertEquals(41L,
+                partition(status).get("lastDurableSequence"));
+    }
+
+    @Test
+    void rejectsNegativeAcceptedSequence() {
         assertThrows(IllegalArgumentException.class,
                 () -> StandaloneStatusBuilder.build(
-                        snapshot("READY", false, 0), -1, 0));
+                        snapshot("READY", false, 0),
+                        -1, 0));
+    }
+
+    @Test
+    void rejectsNegativeDurableSequence() {
+        assertThrows(IllegalArgumentException.class,
+                () -> StandaloneStatusBuilder.build(
+                        snapshot("READY", false, 0),
+                        0, -1));
     }
 }

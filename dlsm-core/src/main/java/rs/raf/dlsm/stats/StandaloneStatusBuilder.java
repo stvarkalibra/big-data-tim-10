@@ -18,14 +18,17 @@ public final class StandaloneStatusBuilder {
 
         Objects.requireNonNull(snapshot, "snapshot");
 
-        if (lastAcceptedSequence < 0
-                || lastDurableSequence < 0
-                || lastDurableSequence > lastAcceptedSequence) {
+        if (lastAcceptedSequence < 0 || lastDurableSequence < 0) {
             throw new IllegalArgumentException(
-                    "Invalid accepted/durable sequence");
+                    "Sequences cannot be negative");
         }
 
         boolean ready = "READY".equals(snapshot.lifecycle());
+
+        if (ready && lastDurableSequence > lastAcceptedSequence) {
+            throw new IllegalArgumentException(
+                    "Durable sequence cannot exceed accepted sequence in READY state");
+        }
 
         Map<String, Object> partition = new LinkedHashMap<>();
         partition.put("partitionId", 0);
