@@ -35,7 +35,7 @@ class EngineMaintenanceTest {
     }
 
     private static Engine engine() {
-        return Engine.openInMemory(EngineConfig.defaults());
+        return TestEngines.withoutFlusher(EngineConfig.defaults());
     }
 
     /** Everything a client can observe: every GET plus one full SCAN. */

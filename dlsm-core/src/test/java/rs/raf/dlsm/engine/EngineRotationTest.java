@@ -244,7 +244,10 @@ class EngineRotationTest {
         engine.put("k2", bytes("v"), ctx());
         assertEquals(List.of("k1"), keys(engine.currentView().immutable()));
         assertEquals("v", get(engine, "k2"));
-        assertEquals(EngineMode.SERVING, engine.mode());
+        // Not FAILED; k2 filled the new generation while k1's still waits
+        // for flush, so the engine is backpressured (still READY).
+        assertEquals(EngineMode.BACKPRESSURED, engine.mode());
+        assertEquals(rs.raf.dlsm.common.Lifecycle.READY, engine.lifecycle());
     }
 
     @Test

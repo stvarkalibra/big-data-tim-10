@@ -103,4 +103,14 @@ public interface MaintenanceHost {
      *                               input is no longer published
      */
     void installCompactionResult(Set<Long> inputTableIds, TableSource output);
+
+    /**
+     * Reports a fatal maintenance error: durable state became uncertain,
+     * e.g. an I/O error after the manifest rename (CP1 §26.1). The engine
+     * enters {@code FAILED} (the first error is kept as
+     * {@code lastFatalError}), wakes writers waiting on backpressure with an
+     * error and refuses every later operation until restart (CP1 §22).
+     * Safe to call with or without the engine write lock.
+     */
+    void reportFatalError(StorageException cause);
 }

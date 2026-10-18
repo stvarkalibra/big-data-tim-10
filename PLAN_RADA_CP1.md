@@ -277,6 +277,7 @@ public interface MaintenanceHost {
     <T> T underEngineWriteLock(OpContext ctx, Callable<T> step) throws Exception; // objava manifesta + zamena pogleda
     void installFlushResult(long memtableGeneration, TableSource table);    // povlači immutable, budi pisce
     void installCompactionResult(Set<Long> inputTableIds, TableSource output);
+    void reportFatalError(StorageException cause);           // npr. IO_ERROR posle preimenovanja manifesta → FAILED
 }
 public interface FlushScheduler { void flushNeeded(); void checkAutoCompaction(); } // Ilija obezbeđuje; ne sme da blokira
 // Objavljena SSTable kako je engine čita; Kimijev SSTableReader je implementira.
