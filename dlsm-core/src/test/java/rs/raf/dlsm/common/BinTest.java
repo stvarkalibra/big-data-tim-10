@@ -246,4 +246,82 @@ class BinTest {
         assertThrows(IndexOutOfBoundsException.class,
                 () -> Bin.putCrc32c(data, 0, 4, 5));
     }
+
+    @Test
+    void checkLengthAcceptsBoundsInclusive() {
+        assertEquals(1, Bin.checkLength(1, 1, 128));
+        assertEquals(64, Bin.checkLength(64, 1, 128));
+        assertEquals(128, Bin.checkLength(128, 1, 128));
+        assertEquals(0, Bin.checkLength(0, 0, 262_144));
+        assertEquals(262_144, Bin.checkLength(262_144, 0, 262_144));
+    }
+
+    @Test
+    void checkLengthRejectsValuesOutsideBounds() {
+        assertThrows(IllegalArgumentException.class,
+                () -> Bin.checkLength(0, 1, 128));
+        assertThrows(IllegalArgumentException.class,
+                () -> Bin.checkLength(129, 1, 128));
+        assertThrows(IllegalArgumentException.class,
+                () -> Bin.checkLength(-1, 0, 128));
+    }
+
+    @Test
+    void checkLengthRejectsCorruptedU32BeforeAllocation() {
+        byte[] corrupted = {
+                (byte) 0xFF, (byte) 0xFF, (byte) 0xFF, (byte) 0xFF};
+        long declared = Bin.getU32(corrupted, 0);
+
+        assertThrows(IllegalArgumentException.class,
+                () -> Bin.checkLength(declared, 31, 262_302));
+    }
+
+    @Test
+    void checkLengthRejectsValuesBeyondIntRange() {
+        assertThrows(IllegalArgumentException.class,
+                () -> Bin.checkLength(
+                        (long) Integer.MAX_VALUE + 1, 0, Integer.MAX_VALUE));
+        assertThrows(IllegalArgumentException.class,
+                () -> Bin.checkLength(Long.MAX_VALUE, 0, 128));
+        assertThrows(IllegalArgumentException.class,
+                () -> Bin.checkLength(Long.MIN_VALUE, 0, 128));
+    }
+
+    @Test
+    void checkLengthRejectsInvalidBounds() {
+        assertThrows(IllegalArgumentException.class,
+                () -> Bin.checkLength(5, -1, 10));
+        assertThrows(IllegalArgumentException.class,
+                () -> Bin.checkLength(5, 10, 1));
+    }
+
+    @Test
+    void fitsWithinAcceptsRegionsInsideLimit() {
+        assertTrue(Bin.fitsWithin(0, 0, 0));
+        assertTrue(Bin.fitsWithin(0, 10, 10));
+        assertTrue(Bin.fitsWithin(4, 6, 10));
+        assertTrue(Bin.fitsWithin(10, 0, 10));
+    }
+
+    @Test
+    void fitsWithinRejectsRegionsPastLimit() {
+        assertFalse(Bin.fitsWithin(0, 11, 10));
+        assertFalse(Bin.fitsWithin(5, 6, 10));
+        assertFalse(Bin.fitsWithin(11, 0, 10));
+    }
+
+    @Test
+    void fitsWithinRejectsNegativeInputs() {
+        assertFalse(Bin.fitsWithin(-1, 1, 10));
+        assertFalse(Bin.fitsWithin(0, -1, 10));
+        assertFalse(Bin.fitsWithin(0, 0, -1));
+    }
+
+    @Test
+    void fitsWithinDoesNotOverflow() {
+        assertFalse(Bin.fitsWithin(Long.MAX_VALUE, 1, Long.MAX_VALUE));
+        assertFalse(Bin.fitsWithin(1, Long.MAX_VALUE, Long.MAX_VALUE));
+        assertFalse(Bin.fitsWithin(Long.MAX_VALUE, Long.MAX_VALUE, 100));
+        assertTrue(Bin.fitsWithin(0, Long.MAX_VALUE, Long.MAX_VALUE));
+    }
 }
