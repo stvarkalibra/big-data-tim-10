@@ -165,6 +165,11 @@ public final class WalReader {
      * Scans {@code segmentFiles} in increasing segment ID, never in the
      * given or listing order, and requires sequences to grow strictly across
      * segments (FORMAT.md §3.5). Stops after the first corrupt segment.
+     *
+     * <p>A torn tail is accepted only as the last frame of the whole log:
+     * every later segment must hold just its header. Otherwise the torn frame
+     * is {@code WAL_FRAME} corruption, because no crash can append after an
+     * interrupted append (FORMAT.md §3.4, docs/ODLUKE.md).
      */
     public static WalLogScan scanSegments(Collection<Path> segmentFiles) throws IOException {
         List<Path> ordered = new ArrayList<>(segmentFiles);
@@ -172,13 +177,24 @@ public final class WalReader {
 
         List<WalScanResult> results = new ArrayList<>();
         long afterSequence = 0;
+        int tornIndex = -1;
 
         for (Path file : ordered) {
             WalScanResult result = scanSegment(file, afterSequence);
+
+            if (tornIndex >= 0 && !isHeaderOnly(result)) {
+                results.set(tornIndex, tornTailNotAtEnd(results.get(tornIndex), result));
+                results.subList(tornIndex + 1, results.size()).clear();
+                break;
+            }
+
             results.add(result);
 
             if (result.status() == WalScanResult.Status.CORRUPT) {
                 break;
+            }
+            if (result.status() == WalScanResult.Status.TORN_TAIL) {
+                tornIndex = results.size() - 1;
             }
             if (result.lastSequence().isPresent()) {
                 afterSequence = result.lastSequence().getAsLong();
@@ -186,6 +202,19 @@ public final class WalReader {
         }
 
         return new WalLogScan(results);
+    }
+
+    private static boolean isHeaderOnly(WalScanResult result) {
+        return result.status() == WalScanResult.Status.VALID && result.entries().isEmpty();
+    }
+
+    private static WalScanResult tornTailNotAtEnd(WalScanResult torn, WalScanResult later) {
+        long offset = torn.tornFrameOffset();
+
+        return WalScanResult.corrupt(torn.segmentId(), torn.entries(), offset, torn.fileSize(),
+                new WalScanResult.Corruption(offset, WalFormat.CATEGORY_FRAME,
+                        "Incomplete frame is not at the end of the log: later segment "
+                                + later.segmentId() + " holds more than its header"));
     }
 
     private static WalScanResult.Corruption corruptionAt(long offset, StorageException e) {
