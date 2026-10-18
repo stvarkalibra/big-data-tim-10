@@ -7,6 +7,7 @@ import rs.raf.dlsm.common.Kind;
 import rs.raf.dlsm.common.StorageException;
 import rs.raf.dlsm.common.UncheckedStorageException;
 import rs.raf.dlsm.engine.TableSource;
+import rs.raf.dlsm.stats.StorageStats;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -29,27 +30,38 @@ public final class DiskSSTableTableSource implements TableSource {
     private final SSTableMeta meta;
     private final SparseIndex index;
     private final BloomFilter bloom;
+    private final StorageStats stats;
 
     private DiskSSTableTableSource(
             Path file,
             SSTableMeta meta,
             SparseIndex index,
-            BloomFilter bloom) {
+            BloomFilter bloom,
+            StorageStats stats) {
 
-        this.file = file;
-        this.meta = meta;
-        this.index = index;
-        this.bloom = bloom;
+        this.file = Objects.requireNonNull(file);
+        this.meta = Objects.requireNonNull(meta);
+        this.index = Objects.requireNonNull(index);
+        this.bloom = Objects.requireNonNull(bloom);
+        this.stats = Objects.requireNonNull(stats);
     }
 
     public static DiskSSTableTableSource open(
             Path file,
             SSTableMeta expected) throws StorageException {
 
-        if (file == null || expected == null) {
+        return open(file, expected, new StorageStats());
+    }
+
+    public static DiskSSTableTableSource open(
+            Path file,
+            SSTableMeta expected,
+            StorageStats stats) throws StorageException {
+
+        if (file == null || expected == null || stats == null) {
             throw failure(
                     "MANIFEST_TABLE_MISMATCH",
-                    "Missing SSTable path or metadata",
+                    "Missing SSTable path, metadata or statistics",
                     null
             );
         }
@@ -77,6 +89,7 @@ public final class DiskSSTableTableSource implements TableSource {
             ).order(ByteOrder.BIG_ENDIAN);
 
             footer.position(32);
+
             long indexOffset = footer.getLong();
             long indexLength = footer.getLong();
             long bloomOffset = footer.getLong();
@@ -86,26 +99,36 @@ public final class DiskSSTableTableSource implements TableSource {
 
             try {
                 index = SparseIndex.deserialize(
-                        readRegion(channel, indexOffset,
-                                indexLength, "INDEX"));
+                        readRegion(channel,
+                                indexOffset,
+                                indexLength,
+                                "INDEX"));
             } catch (IllegalArgumentException e) {
-                throw failure("INDEX",
-                        "Cannot decode SSTable index", e);
+                throw failure(
+                        "INDEX",
+                        "Cannot decode SSTable index",
+                        e
+                );
             }
 
             BloomFilter bloom;
 
             try {
                 bloom = BloomFilter.deserialize(
-                        readRegion(channel, bloomOffset,
-                                bloomLength, "BLOOM"));
+                        readRegion(channel,
+                                bloomOffset,
+                                bloomLength,
+                                "BLOOM"));
             } catch (IllegalArgumentException e) {
-                throw failure("BLOOM",
-                        "Cannot decode SSTable Bloom filter", e);
+                throw failure(
+                        "BLOOM",
+                        "Cannot decode SSTable Bloom filter",
+                        e
+                );
             }
 
             return new DiskSSTableTableSource(
-                    file, expected, index, bloom);
+                    file, expected, index, bloom, stats);
 
         } catch (IOException e) {
             throw failure(
@@ -133,8 +156,11 @@ public final class DiskSSTableTableSource implements TableSource {
         }
 
         if (!bloom.mightContain(key)) {
+            stats.increment("bloomNegativeSkips");
             return Optional.empty();
         }
+
+        stats.increment("bloomPositiveProbes");
 
         SparseIndex.Entry entry = index.findBlock(key);
 
@@ -142,7 +168,8 @@ public final class DiskSSTableTableSource implements TableSource {
             return Optional.empty();
         }
 
-        List<BlockCodec.Record> records = loadBlock(entry);
+        List<BlockCodec.Record> records =
+                loadBlock(entry, false);
 
         for (BlockCodec.Record record : records) {
             int comparison = record.key().compareTo(key);
@@ -169,7 +196,10 @@ public final class DiskSSTableTableSource implements TableSource {
 
         if (entries.isEmpty()) {
             throw failure(
-                    "INDEX", "SSTable index is empty", null);
+                    "INDEX",
+                    "SSTable index is empty",
+                    null
+            );
         }
 
         if (startInclusive.compareTo(meta.maxKey()) > 0) {
@@ -177,6 +207,7 @@ public final class DiskSSTableTableSource implements TableSource {
         }
 
         int firstBlock = 0;
+
         SparseIndex.Entry candidate =
                 index.findBlock(startInclusive);
 
@@ -192,7 +223,7 @@ public final class DiskSSTableTableSource implements TableSource {
             private int recordPosition;
             private List<BlockCodec.Record> current = List.of();
             private InternalRecord next;
-            private boolean initialized;
+            private boolean searchingStart = true;
 
             private void advance() {
                 if (next != null) {
@@ -204,13 +235,13 @@ public final class DiskSSTableTableSource implements TableSource {
                         BlockCodec.Record record =
                                 current.get(recordPosition++);
 
-                        if (!initialized
+                        if (searchingStart
                                 && record.key().compareTo(
                                 startInclusive) < 0) {
                             continue;
                         }
 
-                        initialized = true;
+                        searchingStart = false;
                         next = convert(record);
                         return;
                     }
@@ -221,7 +252,9 @@ public final class DiskSSTableTableSource implements TableSource {
 
                     try {
                         current = loadBlock(
-                                entries.get(blockPosition++));
+                                entries.get(blockPosition++),
+                                true
+                        );
                     } catch (StorageException e) {
                         throw new UncheckedStorageException(e);
                     }
@@ -250,11 +283,16 @@ public final class DiskSSTableTableSource implements TableSource {
     }
 
     private List<BlockCodec.Record> loadBlock(
-            SparseIndex.Entry entry) throws StorageException {
+            SparseIndex.Entry entry,
+            boolean rangeScan) throws StorageException {
 
-        if (entry.length() > MAX_BLOCK_BYTES) {
+        if (entry.length() <= 0
+                || entry.length() > MAX_BLOCK_BYTES) {
             throw failure(
-                    "DATA_BLOCK", "SSTable block too large", null);
+                    "DATA_BLOCK",
+                    "Invalid SSTable block size",
+                    null
+            );
         }
 
         try (FileChannel channel = FileChannel.open(
@@ -266,6 +304,13 @@ public final class DiskSSTableTableSource implements TableSource {
                     entry.length(),
                     "DATA_BLOCK"
             );
+
+            stats.increment("sstableDataBlocksRead");
+            stats.add("sstableDataBytesRead", bytes.length);
+
+            if (rangeScan) {
+                stats.increment("rangeScanBlocksRead");
+            }
 
             List<BlockCodec.Record> records;
 
@@ -304,7 +349,8 @@ public final class DiskSSTableTableSource implements TableSource {
             FileChannel channel,
             long offset,
             long length,
-            String category) throws StorageException, IOException {
+            String category)
+            throws StorageException, IOException {
 
         if (length <= 0
                 || length > MAX_REGION_BYTES
@@ -312,24 +358,36 @@ public final class DiskSSTableTableSource implements TableSource {
                 || offset > channel.size()
                 || length > channel.size() - offset) {
             throw failure(
-                    category, "Invalid SSTable region", null);
+                    category,
+                    "Invalid SSTable region",
+                    null
+            );
         }
 
         return read(
-                channel, offset, Math.toIntExact(length), category);
+                channel,
+                offset,
+                Math.toIntExact(length),
+                category
+        );
     }
 
     private static byte[] read(
             FileChannel channel,
             long offset,
             int length,
-            String category) throws StorageException, IOException {
+            String category)
+            throws StorageException, IOException {
 
-        if (offset < 0 || length < 0
+        if (offset < 0
+                || length < 0
                 || offset > channel.size()
                 || (long) length > channel.size() - offset) {
             throw failure(
-                    category, "Truncated SSTable region", null);
+                    category,
+                    "Truncated SSTable region",
+                    null
+            );
         }
 
         ByteBuffer buffer = ByteBuffer.allocate(length);
@@ -340,7 +398,10 @@ public final class DiskSSTableTableSource implements TableSource {
 
             if (count <= 0) {
                 throw failure(
-                        category, "Incomplete SSTable read", null);
+                        category,
+                        "Incomplete SSTable read",
+                        null
+                );
             }
 
             position += count;
