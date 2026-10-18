@@ -562,3 +562,243 @@ The index does not store every user key.
 The decoder checks the checksum, format version, entry count, key validity, strictly increasing keys, positive block lengths, nonnegative offsets, and nonoverlapping block ranges.
 
 These formats are version 1 team-defined encodings. SSTableWriter and SSTableReader must use these exact encodings consistently.
+
+## SSTable — Complete File Format (v1)
+
+### General rules
+
+- File name: `sst-<20-digit-tableId>.sst`
+- Byte order: big-endian
+- Format version: 1
+- Key encoding: ASCII
+- Checksums: CRC32C
+- Tables are immutable after finalization.
+- Keys are stored in strictly increasing order.
+- Every logical key occurs at most once per SSTable.
+- DELETE tombstones are stored as records and included in Bloom.
+
+### File layout
+
+The complete SSTable consists of five contiguous regions:
+
+| Region | Size | Description |
+|---|---:|---|
+| Header | 16 bytes | Magic, version, table ID |
+| Data blocks | Variable | Sorted records protected by CRC32C |
+| Sparse index | Variable | First key, offset and length per block |
+| Bloom filter | Variable | Membership filter for stored keys |
+| Footer | 384 bytes | Region layout and table metadata |
+
+No gaps are permitted between regions.
+
+The footer is always located at:
+
+`fileSize - 384`
+
+### Header
+
+| Offset | Size | Field |
+|---|---:|---|
+| 0 | 4 | Magic `SST1` (`53 53 54 31`) |
+| 4 | 4 | Version = 1 |
+| 8 | 8 | Positive table ID |
+
+The header has no independent checksum.
+
+### Data region
+
+Data starts at absolute offset 16.
+
+Each data block uses the `DBL1` format defined earlier
+in this document.
+
+Records are ordered by key across the entire data region,
+not merely within each individual block.
+
+The target payload size is 4096 bytes. An oversized record
+occupies a separate block.
+
+A data block includes:
+- 16-byte header
+- Encoded record payload
+- 4-byte CRC32C checksum
+
+CRC32C covers the entire block except its last 4 bytes.
+
+### Sparse index region
+
+The sparse index uses the `IDX1` format described above.
+
+Exactly one index entry identifies each data block.
+
+Every index entry contains:
+- First key in the referenced block
+- Absolute file offset of that block
+- Encoded length of that block
+
+Entries are ordered by their first key.
+
+Point lookup chooses the last index entry whose first key
+is less than or equal to the requested key.
+
+### Bloom region
+
+The Bloom region uses the `BLM1` format defined above.
+
+- Hash version = 1
+- SHA-256 double hashing
+- Seven probes
+- Bit count: `max(64, 10 * expectedEntries)`, rounded up
+  to a multiple of 8
+- Bit numbering within each byte is least significant bit first
+
+The Bloom filter includes both PUT keys and DELETE tombstones.
+
+A negative result allows the reader to skip the data region.
+A positive result is not proof that a key exists.
+
+### Footer
+
+The footer is exactly 384 bytes.
+
+| Offset within footer | Size | Field |
+|---|---:|---|
+| 0 | 4 | Magic `FTR1` |
+| 4 | 4 | Version = 1 |
+| 8 | 8 | Table ID |
+| 16 | 8 | Data offset |
+| 24 | 8 | Data length |
+| 32 | 8 | Index offset |
+| 40 | 8 | Index length |
+| 48 | 8 | Bloom offset |
+| 56 | 8 | Bloom length |
+| 64 | 8 | Minimum sequence |
+| 72 | 8 | Maximum sequence |
+| 80 | 8 | Entry count |
+| 88 | 132 | Minimum key |
+| 220 | 132 | Maximum key |
+| 352 | 28 | Reserved, all zero |
+| 380 | 4 | Footer CRC32C |
+
+Each fixed-width key field contains:
+- 4-byte key length
+- Up to 128 ASCII key bytes
+- Zero padding to 128 key bytes
+
+The footer CRC32C covers footer bytes 0 through 379.
+
+The complete file must satisfy:
+
+`dataOffset = 16`
+
+`indexOffset = dataOffset + dataLength`
+
+`bloomOffset = indexOffset + indexLength`
+
+`footerOffset = bloomOffset + bloomLength`
+
+`fileSize = footerOffset + 384`
+
+All region offsets are absolute file offsets.
+
+### Complete validation
+
+The validator accepts a Path and expected SSTableMeta.
+
+It verifies:
+1. File existence and minimum size
+2. Header magic, version and table ID
+3. Footer magic, version and CRC32C
+4. Exact, contiguous region boundaries
+5. Sparse index format, ordering and checksum
+6. Bloom format, parameters and checksum
+7. Each data block and its checksum
+8. Strict key ordering across block boundaries
+9. Index entries matching their data blocks
+10. No Bloom false negatives for stored keys
+11. Entry count, min/max keys and sequences
+12. Agreement with expected manifest metadata
+
+Data blocks are read progressively, without loading
+the complete SSTable into memory.
+
+Corrupt data must never be interpreted as a missing key.
+
+### Decoded example — one-record SSTable
+
+Input:
+
+- tableId = 7
+- key = `alpha`
+- sequence = 1
+- kind = PUT
+- value = ASCII `A`
+- expectedEntries = 1
+
+The resulting table is 512 bytes.
+
+| Region | Absolute offset | Length |
+|---|---:|---:|
+| Header | 0 | 16 |
+| Data block | 16 | 43 |
+| Sparse index | 59 | 37 |
+| Bloom | 96 | 32 |
+| Footer | 128 | 384 |
+
+Header fields:
+
+- magic = `SST1`
+- version = 1
+- tableId = 7
+
+Data block:
+
+- magic = `DBL1`
+- version = 1
+- recordCount = 1
+- payloadLength = 23
+- record key = `alpha`
+- sequence = 1
+- kind = PUT
+- valueLength = 1
+- value = `A`
+- CRC32C = valid
+
+Sparse index:
+
+- magic = `IDX1`
+- entryCount = 1
+- firstKey = `alpha`
+- blockOffset = 16
+- blockLength = 43
+- CRC32C = valid
+
+Bloom:
+
+- magic = `BLM1`
+- hashVersion = 1
+- bitCount = 64
+- hashFunctions = 7
+- bitArrayLength = 8
+- `mightContain("alpha")` = true
+- CRC32C = valid
+
+Footer:
+
+- magic = `FTR1`
+- tableId = 7
+- dataOffset = 16
+- dataLength = 43
+- indexOffset = 59
+- indexLength = 37
+- bloomOffset = 96
+- bloomLength = 32
+- minKey = `alpha`
+- maxKey = `alpha`
+- minSequence = 1
+- maxSequence = 1
+- entryCount = 1
+- CRC32C = valid
+
+The example is also checked by
+`SSTableFormatContractTest`.
