@@ -1,0 +1,15 @@
+
+# IntelliJ
+.idea/
+*.iml
+
+# Maven
+**/target/
+
+# Java
+*.class
+*.log
+
+# Environment
+.env
+.env.*
