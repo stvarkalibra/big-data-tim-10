@@ -100,6 +100,7 @@ public final class HttpServerHost implements AutoCloseable {
     private void handle(HttpExchange exchange) {
         String requestId = null;
         ApiResponse response;
+        Error fatal = null;
 
         try {
             Headers headers = exchange.getRequestHeaders();
@@ -135,10 +136,13 @@ public final class HttpServerHost implements AutoCloseable {
         } catch (StorageException e) {
             response = ApiResponse.error(
                     e.code(), e.getMessage(), requestId, storageErrorPartition);
-        } catch (RuntimeException e) {
+        } catch (RuntimeException | Error e) {
             logFailure("HTTP_INTERNAL_ERROR", requestId, e);
             response = ApiResponse.error(ErrorCode.INTERNAL_ERROR,
                     "Internal error", requestId, null);
+            if (e instanceof Error error) {
+                fatal = error;
+            }
         }
 
         try {
@@ -148,7 +152,14 @@ public final class HttpServerHost implements AutoCloseable {
             // nothing more can be sent on this exchange.
             logFailure("HTTP_RESPONSE_WRITE_FAILED", requestId, e);
         } finally {
+            // Always close, even on an Error: an unclosed exchange leaves
+            // the client waiting forever.
             exchange.close();
+        }
+
+        if (fatal != null) {
+            // The client got its 500; the Error itself is not ours to swallow.
+            throw fatal;
         }
     }
 
@@ -183,7 +194,7 @@ public final class HttpServerHost implements AutoCloseable {
         }
     }
 
-    private void logFailure(String event, String requestId, Exception e) {
+    private void logFailure(String event, String requestId, Throwable e) {
         Map<String, Object> fields = new HashMap<>();
         fields.put("requestId", requestId);
         fields.put("errorCode", ErrorCode.INTERNAL_ERROR.name());
