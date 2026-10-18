@@ -7,10 +7,14 @@ import rs.raf.dlsm.common.StorageException;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
+import java.nio.file.DirectoryStream;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
+import java.util.Comparator;
 import java.util.List;
 
 /**
@@ -135,6 +139,53 @@ public final class WalReader {
 
             return WalScanResult.valid(segmentId, entries, size);
         }
+    }
+
+    /**
+     * Scans every final segment in {@code walDir}: files whose name is
+     * {@code wal-<id>.log} with a positive ID. Other files are left to the
+     * caller's directory classification (CP1 §21.1 step 5).
+     */
+    public static WalLogScan scanLog(Path walDir) throws IOException {
+        List<Path> files = new ArrayList<>();
+
+        try (DirectoryStream<Path> stream = Files.newDirectoryStream(walDir)) {
+            for (Path file : stream) {
+                long id = WalFileNames.parseSegmentId(file.getFileName().toString()).orElse(0);
+                if (id > 0 && Files.isRegularFile(file)) {
+                    files.add(file);
+                }
+            }
+        }
+
+        return scanSegments(files);
+    }
+
+    /**
+     * Scans {@code segmentFiles} in increasing segment ID, never in the
+     * given or listing order, and requires sequences to grow strictly across
+     * segments (FORMAT.md §3.5). Stops after the first corrupt segment.
+     */
+    public static WalLogScan scanSegments(Collection<Path> segmentFiles) throws IOException {
+        List<Path> ordered = new ArrayList<>(segmentFiles);
+        ordered.sort(Comparator.comparingLong(WalReader::segmentIdOf));
+
+        List<WalScanResult> results = new ArrayList<>();
+        long afterSequence = 0;
+
+        for (Path file : ordered) {
+            WalScanResult result = scanSegment(file, afterSequence);
+            results.add(result);
+
+            if (result.status() == WalScanResult.Status.CORRUPT) {
+                break;
+            }
+            if (result.lastSequence().isPresent()) {
+                afterSequence = result.lastSequence().getAsLong();
+            }
+        }
+
+        return new WalLogScan(results);
     }
 
     private static WalScanResult.Corruption corruptionAt(long offset, StorageException e) {
