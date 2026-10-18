@@ -17,6 +17,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
@@ -38,10 +39,12 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
  *
  * <p>The active MemTable and its WAL segment form one pair that rotation
  * replaces as a whole (CP1 §10): a full generation is frozen into the view
- * and handed to the flush worker through {@link FlushScheduler}.
+ * and handed to the flush worker through {@link FlushScheduler}. At most
+ * one frozen generation exists: when the active one fills up again first,
+ * writers wait for the flush (backpressure, mode {@code BACKPRESSURED}).
  *
- * <p>Not yet here: backpressure, recovery, failpoints and statistics.
- * Their places are marked in the code.
+ * <p>Not yet here: recovery, failpoints and statistics. Their places are
+ * marked in the code.
  */
 public final class Engine implements StorageEngine, MaintenanceHost {
 
@@ -51,6 +54,8 @@ public final class Engine implements StorageEngine, MaintenanceHost {
     };
 
     private final ReentrantReadWriteLock engineLock = new ReentrantReadWriteLock(true);
+    /** Signalled when the frozen slot becomes free; bound to the write lock. */
+    private final Condition rotationSlotFree = engineLock.writeLock().newCondition();
     private final long memtableMaxBytes;
     private final WalFactory walFactory;
     private final SequenceAllocator sequences;
@@ -65,6 +70,9 @@ public final class Engine implements StorageEngine, MaintenanceHost {
      * maintenance can read the current view without locking.
      */
     private volatile EngineView view;
+
+    /** Changed under the write lock; volatile so status can read it without locking. */
+    private volatile int waitingWriters;
 
     /** Written under a lock; volatile so health can read it without locking. */
     private volatile EngineMode mode;
@@ -145,13 +153,13 @@ public final class Engine implements StorageEngine, MaintenanceHost {
         try {
             requireMode("Engine does not accept mutations");      // step 3
             // CP1 §10: a full active generation must rotate before the next
-            // mutation appends. If rotation fails this mutation fails too, and
+            // mutation appends. With the frozen slot still taken the writer
+            // waits for flush; if rotation fails this mutation fails too, and
             // the old pair stays current.
-            if (active.rotationRequired() && view.immutable() == null) {
+            awaitRotationSlot(ctx);
+            if (active.rotationRequired()) {
                 rotateLocked(ctx);
             }
-            // TODO(backpressure): while a frozen generation still waits for
-            // flush, wait here (bounded by the deadline) instead of growing.
 
             long sequence;
             try {
@@ -179,6 +187,9 @@ public final class Engine implements StorageEngine, MaintenanceHost {
                 throw fail(new StorageException(ErrorCode.INTERNAL_ERROR, null,
                         "MemTable apply failed after WAL force", e));
             }
+            // This mutation may have filled the active generation while the
+            // frozen one still waits: from now on writers are backpressured.
+            updatePressureLocked();
             // failpoint: memtable.after-apply.before-response
 
             return new MutationResult(sequence);
@@ -186,6 +197,68 @@ public final class Engine implements StorageEngine, MaintenanceHost {
             // Step 9: readers see the record once the write lock is released.
             writeLock.unlock();                                   // step 10
         }
+    }
+
+    /**
+     * Backpressure (CP1 §10, §13.1): while the active generation is full and
+     * the frozen slot is still taken, wait for flush. {@code awaitNanos}
+     * releases the write lock, so the flush can publish and the readers keep
+     * reading; the wait is bounded by the request deadline. A writer that
+     * gives up has consumed no sequence and touched no WAL.
+     */
+    private void awaitRotationSlot(OpContext ctx) throws StorageException {
+        if (!slotBlocked()) {
+            return;
+        }
+        waitingWriters++;
+        updatePressureLocked();
+        try {
+            while (slotBlocked()) {
+                long remaining = ctx.remainingNanos();
+                if (remaining <= 0) {
+                    throw new StorageException(ErrorCode.DEADLINE_EXCEEDED,
+                            "Deadline expired while writes wait for flush");
+                }
+                try {
+                    rotationSlotFree.awaitNanos(remaining);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new StorageException(ErrorCode.INTERNAL_ERROR,
+                            "Interrupted while waiting for flush");
+                }
+                requireMode("Engine does not accept mutations");
+            }
+        } finally {
+            waitingWriters--;
+        }
+    }
+
+    /** The active generation must rotate, but the frozen slot is taken. */
+    private boolean slotBlocked() {
+        return active.rotationRequired() && view.immutable() != null;
+    }
+
+    /**
+     * SERVING ⇄ BACKPRESSURED (CP1 §22). Called under the write lock after
+     * every change of the active generation or the frozen slot; never
+     * leaves FAILED.
+     */
+    private void updatePressureLocked() {
+        synchronized (failureLock) {
+            if (mode == EngineMode.SERVING || mode == EngineMode.BACKPRESSURED) {
+                mode = slotBlocked() ? EngineMode.BACKPRESSURED : EngineMode.SERVING;
+            }
+        }
+    }
+
+    /** Status {@code writeBackpressure}: writes cannot proceed until a flush. */
+    public boolean writeBackpressure() {
+        return mode == EngineMode.BACKPRESSURED;
+    }
+
+    /** Status {@code backpressuredWriters}: writers currently waiting for flush. */
+    public int backpressuredWriters() {
+        return waitingWriters;
     }
 
     /**
@@ -221,6 +294,7 @@ public final class Engine implements StorageEngine, MaintenanceHost {
         activeLog = nextLog;
         view = new EngineView(frozen, view.tables());
         previousLog.close();
+        updatePressureLocked();
         // failpoint: rotation.after-switch.before-flush
 
         // Step 4: hand the frozen generation to the flush worker.
@@ -298,7 +372,10 @@ public final class Engine implements StorageEngine, MaintenanceHost {
         List<TableSource> tables = new ArrayList<>(current.tables());
         tables.add(table);
         view = new EngineView(null, tables);
-        // TODO(backpressure): wake writers waiting for the frozen slot.
+
+        // The frozen slot is free again: waiting writers may rotate now.
+        updatePressureLocked();
+        rotationSlotFree.signalAll();
     }
 
     @Override
