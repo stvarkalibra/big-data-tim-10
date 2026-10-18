@@ -14,10 +14,20 @@ import java.util.Objects;
 public final class ApiException extends Exception {
 
     private final ErrorCode code;
+    private final PartitionRef partition;
 
     public ApiException(ErrorCode code, String message) {
+        this(code, message, null);
+    }
+
+    /**
+     * @param partition partition context once the request is known to
+     *                  target one (e.g. a valid key), otherwise {@code null}
+     */
+    public ApiException(ErrorCode code, String message, PartitionRef partition) {
         super(Objects.requireNonNull(message, "message"));
         this.code = Objects.requireNonNull(code, "code");
+        this.partition = partition;
     }
 
     public static ApiException invalid(String message) {
@@ -26,5 +36,10 @@ public final class ApiException extends Exception {
 
     public ErrorCode code() {
         return code;
+    }
+
+    /** Partition context for the error envelope, or {@code null} if unknown. */
+    public PartitionRef partition() {
+        return partition;
     }
 }
