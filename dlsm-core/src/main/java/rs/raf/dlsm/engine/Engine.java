@@ -76,6 +76,12 @@ public final class Engine implements StorageEngine, MaintenanceHost {
     /** Changed under the write lock; volatile so status can read it without locking. */
     private volatile int waitingWriters;
 
+    /**
+     * Greatest sequence whose WAL record was forced, or that was already
+     * durable when the engine opened. Guarded by engineLock.
+     */
+    private long lastForcedSequence;
+
     /** Written under a lock; volatile so health can read it without locking. */
     private volatile EngineMode mode;
     private volatile StorageException lastFatalError;
@@ -106,6 +112,9 @@ public final class Engine implements StorageEngine, MaintenanceHost {
         long generation = initialView.immutable() == null
                 ? 1 : initialView.immutable().generation() + 1;
         this.active = new MemTable(generation, memtableMaxBytes);
+        // Everything the engine opens with (recovered generation, published
+        // tables) is already durable.
+        this.lastForcedSequence = initialView.maxSequence();
         this.mode = EngineMode.SERVING;
     }
 
@@ -182,6 +191,7 @@ public final class Engine implements StorageEngine, MaintenanceHost {
                 activeLog.append(record, ctx);                    // steps 5–6
                 // Durability boundary and linearization point (CP1 §9.2).
                 activeLog.force(ctx);                             // step 7
+                lastForcedSequence = sequence;
             } catch (IOException e) {
                 // The WAL tail is now uncertain: never append behind it.
                 throw fail(new StorageException(ErrorCode.STORAGE_IO, null,
@@ -268,6 +278,77 @@ public final class Engine implements StorageEngine, MaintenanceHost {
     /** Status {@code backpressuredWriters}: writers currently waiting for flush. */
     public int backpressuredWriters() {
         return waitingWriters;
+    }
+
+    /**
+     * The engine part of the storage status (CP1 §24) as one consistent
+     * snapshot taken under the read lock. Works in every mode, FAILED
+     * included: that is when the status matters most.
+     */
+    public EngineStatus status(OpContext ctx) throws StorageException {
+        Lock readLock = engineLock.readLock();
+        acquire(readLock, ctx);
+        try {
+            EngineView current = view;
+            EngineMode currentMode = mode;
+            StorageException fatal = lastFatalError;
+
+            long tablesMax = 0;
+            List<rs.raf.dlsm.sstable.SSTableMeta> tables = new ArrayList<>();
+            for (TableSource table : current.tables()) {
+                tables.add(table.meta());
+                tablesMax = Math.max(tablesMax, table.meta().maxSequence());
+            }
+
+            ImmutableMemTable frozen = current.immutable();
+            EngineStatus.Memtable frozenStatus = frozen == null ? null
+                    : new EngineStatus.Memtable(frozen.generation(), null,
+                            frozen.walSegmentIds(), frozen.entryCount(),
+                            frozen.logicalBytes(), frozen.minSequence(),
+                            frozen.maxSequence(), null);
+
+            EngineStatus.Memtable activeStatus = new EngineStatus.Memtable(
+                    active.generation(), activeLog.segmentId(), null,
+                    active.entryCount(), active.logicalBytes(),
+                    boxed(active.minSequence()), boxed(active.maxSequence()),
+                    active.rotationRequired());
+
+            return new EngineStatus(
+                    currentMode.lifecycle(),
+                    currentMode,
+                    currentMode == EngineMode.BACKPRESSURED,
+                    waitingWriters,
+                    fatal == null ? null : EngineStatus.FatalError.of(fatal),
+                    boxed(sequences.nextSequence()),
+                    Math.max(active.maxSequence().orElse(0), current.maxSequence()),
+                    Math.max(lastForcedSequence, tablesMax),
+                    activeStatus,
+                    frozenStatus,
+                    tables);
+        } finally {
+            readLock.unlock();
+        }
+    }
+
+    /**
+     * Runs {@code step} under the engine read lock, so a status handler can
+     * read other modules' state (e.g. the manifest, which is published
+     * under the write lock) consistently with {@link #status}. Works in
+     * every mode; the wait is bounded by the deadline.
+     */
+    public <T> T underEngineReadLock(OpContext ctx, Callable<T> step) throws Exception {
+        Objects.requireNonNull(step, "step");
+        Lock readLock = engineLock.readLock();
+        acquire(readLock, ctx);
+        try {
+            return step.call();
+        } finally {
+            readLock.unlock();
+        }
+    }
+
+    private static Long boxed(java.util.OptionalLong value) {
+        return value.isPresent() ? value.getAsLong() : null;
     }
 
     /**
