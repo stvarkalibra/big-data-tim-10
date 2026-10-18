@@ -3,12 +3,20 @@ package rs.raf.dlsm.server;
 import rs.raf.dlsm.log.JsonLog;
 
 import java.io.IOException;
+import java.util.List;
 import java.util.Map;
 
 /**
- * Process entry point. Configuration errors exit with code 2 and startup
- * failures with code 1, before any request is served. There is no
- * shutdown hook: durability never depends on a clean shutdown (CP1 §3).
+ * Process entry point.
+ *
+ * <ul>
+ *   <li>No arguments: run the standalone node. Configuration errors exit
+ *       with code 2 and startup failures with code 1, before any request
+ *       is served. There is no shutdown hook: durability never depends on
+ *       a clean shutdown (CP1 §3).</li>
+ *   <li>{@code inspect ...}: offline inspection for {@code dbctl}
+ *       (CP1 §25); see {@link InspectCommand}. Nothing else is started.</li>
+ * </ul>
  */
 public final class Main {
 
@@ -16,6 +24,19 @@ public final class Main {
     }
 
     public static void main(String[] args) {
+        if (args.length > 0) {
+            if (args[0].equals("inspect")) {
+                List<String> rest = List.of(args).subList(1, args.length);
+                System.exit(InspectCommand.run(rest, System.out, System.err));
+                return;
+            }
+            System.err.println("Unknown command: " + args[0]);
+            System.err.println("usage: Main            (run the standalone node)");
+            System.err.println("       Main inspect wal [--data-dir PATH]");
+            System.exit(InspectCommand.EXIT_USAGE);
+            return;
+        }
+
         ServerConfig config;
         try {
             config = ServerConfig.fromEnv(System.getenv());
