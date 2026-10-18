@@ -53,6 +53,23 @@ public final class WalReader {
      * @throws IllegalArgumentException when the file name is not {@code wal-<id>.log}
      */
     public static WalScanResult scanSegment(Path file) throws IOException {
+        return scanSegment(file, 0);
+    }
+
+    /**
+     * Same as {@link #scanSegment(Path)}, and every sequence must also be
+     * strictly greater than the one before it, starting from
+     * {@code afterSequence}: the last sequence of the previous segment that
+     * has records, or {@code 0} for the first (FORMAT.md §3.5).
+     */
+    public static WalScanResult scanSegment(Path file, long afterSequence)
+            throws IOException {
+
+        if (afterSequence < 0) {
+            throw new IllegalArgumentException(
+                    "afterSequence must not be negative: " + afterSequence);
+        }
+
         long segmentId = segmentIdOf(file);
 
         try (FileChannel channel = FileChannel.open(file, StandardOpenOption.READ)) {
@@ -68,6 +85,7 @@ public final class WalReader {
 
             List<WalScanResult.Entry> entries = new ArrayList<>();
             long position = WalFormat.SEGMENT_HEADER_BYTES;
+            long previousSequence = afterSequence;
 
             while (position < size) {
                 // Step 1: EOF cuts the guarded frame header.
@@ -99,7 +117,19 @@ public final class WalReader {
                             corruptionAt(position, e));
                 }
 
+                // Step 9: strictly increasing, checked after the CRC so a damaged
+                // sequence is reported as CHECKSUM. Never repaired by sorting.
+                if (record.sequence() <= previousSequence) {
+                    return WalScanResult.corrupt(segmentId, entries, position, size,
+                            new WalScanResult.Corruption(position,
+                                    WalFormat.CATEGORY_SEQUENCE_ORDER,
+                                    "Sequence " + record.sequence()
+                                            + " not greater than previous "
+                                            + previousSequence));
+                }
+
                 entries.add(new WalScanResult.Entry(position, total, record));
+                previousSequence = record.sequence();
                 position += total;
             }
 
