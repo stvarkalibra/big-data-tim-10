@@ -126,6 +126,40 @@ public final class Bin {
         putU32(data, crcOffset, crc32c(data, from, length));
     }
 
+    /**
+     * Accepts a length decoded from untrusted bytes only when it lies in
+     * {@code [min, max]}, so it can be used for allocation (CP1 §15:
+     * invalid lengths are rejected before allocating memory).
+     *
+     * @return the declared length as an {@code int}
+     * @throws IllegalArgumentException when the length is outside bounds
+     */
+    public static int checkLength(long declared, int min, int max) {
+        if (min < 0 || min > max) {
+            throw new IllegalArgumentException(
+                    "Invalid length bounds [" + min + ", " + max + "]");
+        }
+
+        if (declared < min || declared > max) {
+            throw new IllegalArgumentException(
+                    "Declared length " + declared
+                            + " outside [" + min + ", " + max + "]");
+        }
+
+        return (int) declared;
+    }
+
+    /**
+     * True when {@code [offset, offset + length)} lies inside
+     * {@code [0, limit)}, e.g. a declared region inside the physical file
+     * (CP1 §15: never trust offsets or lengths beyond the real file).
+     * Overflow-safe for any inputs; negative inputs never fit.
+     */
+    public static boolean fitsWithin(long offset, long length, long limit) {
+        return offset >= 0 && length >= 0 && limit >= 0
+                && offset <= limit - length;
+    }
+
     private static void checkRange(byte[] data, int offset, int width) {
         Objects.requireNonNull(data, "data");
         Objects.checkFromIndexSize(offset, width, data.length);
