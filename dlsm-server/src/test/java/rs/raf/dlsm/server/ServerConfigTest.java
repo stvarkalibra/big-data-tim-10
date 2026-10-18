@@ -15,6 +15,27 @@ class ServerConfigTest {
         assertEquals("standalone", config.nodeId());
         assertEquals(8080, config.publicPort());
         assertEquals(8082, config.adminPort());
+        assertEquals(1_048_576, config.memtableMaxBytes());
+        assertEquals(1_048_576, config.engineConfig().memtableMaxBytes());
+    }
+
+    @Test
+    void readsMemtableMaxBytes() {
+        assertEquals(4096, ServerConfig.fromEnv(
+                Map.of("MEMTABLE_MAX_BYTES", "4096")).memtableMaxBytes());
+        assertEquals(1, ServerConfig.fromEnv(
+                Map.of("MEMTABLE_MAX_BYTES", "1")).memtableMaxBytes());
+    }
+
+    @Test
+    void rejectsBadMemtableMaxBytes() {
+        for (String value : new String[] {"", "0", "-1", "1k", "1.5", "9".repeat(19)}) {
+            IllegalArgumentException e = assertThrows(
+                    IllegalArgumentException.class,
+                    () -> ServerConfig.fromEnv(Map.of("MEMTABLE_MAX_BYTES", value)),
+                    value);
+            assertTrue(e.getMessage().contains("MEMTABLE_MAX_BYTES"));
+        }
     }
 
     @Test

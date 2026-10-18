@@ -1,5 +1,7 @@
 package rs.raf.dlsm.server;
 
+import rs.raf.dlsm.engine.EngineConfig;
+
 import java.util.Map;
 import java.util.Objects;
 
@@ -9,18 +11,22 @@ import java.util.Objects;
  * <ul>
  *   <li>{@code NODE_ID} — node identity, default {@code standalone};</li>
  *   <li>{@code DLSM_PUBLIC_PORT} — public API port, default {@code 8080};</li>
- *   <li>{@code DLSM_ADMIN_PORT} — admin/test port, default {@code 8082}.</li>
+ *   <li>{@code DLSM_ADMIN_PORT} — admin/test port, default {@code 8082};</li>
+ *   <li>{@code MEMTABLE_MAX_BYTES} — MemTable rotation threshold, default
+ *       1 MiB (CP1 §10).</li>
  * </ul>
  *
  * <p>The graded ports are fixed (PI §17.1); the port overrides exist so the
  * test harness can run several child processes side by side. Port 0 asks
  * the OS for a free port.
  */
-public record ServerConfig(String nodeId, int publicPort, int adminPort) {
+public record ServerConfig(String nodeId, int publicPort, int adminPort,
+                           long memtableMaxBytes) {
 
     public static final String NODE_ID = "NODE_ID";
     public static final String PUBLIC_PORT = "DLSM_PUBLIC_PORT";
     public static final String ADMIN_PORT = "DLSM_ADMIN_PORT";
+    public static final String MEMTABLE_MAX_BYTES = "MEMTABLE_MAX_BYTES";
 
     public static final String DEFAULT_NODE_ID = "standalone";
     public static final int DEFAULT_PUBLIC_PORT = 8080;
@@ -36,6 +42,15 @@ public record ServerConfig(String nodeId, int publicPort, int adminPort) {
             throw new IllegalArgumentException(
                     PUBLIC_PORT + " and " + ADMIN_PORT + " must differ");
         }
+        if (memtableMaxBytes < 1) {
+            throw new IllegalArgumentException("Invalid " + MEMTABLE_MAX_BYTES);
+        }
+    }
+
+    /** Defaults for everything except the ports, e.g. for tests on port 0. */
+    public static ServerConfig onPorts(int publicPort, int adminPort) {
+        return new ServerConfig(DEFAULT_NODE_ID, publicPort, adminPort,
+                EngineConfig.DEFAULT_MEMTABLE_MAX_BYTES);
     }
 
     /** @throws IllegalArgumentException naming the bad variable */
@@ -43,20 +58,28 @@ public record ServerConfig(String nodeId, int publicPort, int adminPort) {
         Objects.requireNonNull(env, "env");
         return new ServerConfig(
                 env.getOrDefault(NODE_ID, DEFAULT_NODE_ID),
-                port(env, PUBLIC_PORT, DEFAULT_PUBLIC_PORT),
-                port(env, ADMIN_PORT, DEFAULT_ADMIN_PORT));
+                (int) number(env, PUBLIC_PORT, DEFAULT_PUBLIC_PORT, 5),
+                (int) number(env, ADMIN_PORT, DEFAULT_ADMIN_PORT, 5),
+                number(env, MEMTABLE_MAX_BYTES,
+                        EngineConfig.DEFAULT_MEMTABLE_MAX_BYTES, 18));
     }
 
-    private static int port(Map<String, String> env, String name, int fallback) {
+    public EngineConfig engineConfig() {
+        return new EngineConfig(memtableMaxBytes);
+    }
+
+    /** Plain decimal digits; the digit limit keeps parsing overflow-free. */
+    private static long number(Map<String, String> env, String name,
+                               long fallback, int maxDigits) {
         String text = env.get(name);
         if (text == null) {
             return fallback;
         }
-        if (text.isEmpty() || text.length() > 5
+        if (text.isEmpty() || text.length() > maxDigits
                 || !text.chars().allMatch(c -> c >= '0' && c <= '9')) {
             throw new IllegalArgumentException("Invalid " + name);
         }
-        return Integer.parseInt(text);
+        return Long.parseLong(text);
     }
 
     private static void checkPort(String name, int port) {

@@ -35,7 +35,7 @@ class StandaloneNodeTest {
     @Test
     void startsBothServersAndReportsReady() throws Exception {
         try (StandaloneNode node = StandaloneNode.start(
-                new ServerConfig("standalone", 0, 0), log)) {
+                ServerConfig.onPorts(0, 0), log)) {
 
             assertEquals(Lifecycle.READY, node.lifecycle());
             assertNotEquals(node.publicPort(), node.adminPort());
@@ -56,7 +56,7 @@ class StandaloneNodeTest {
     @Test
     void closeReportsStopping() throws Exception {
         StandaloneNode node = StandaloneNode.start(
-                new ServerConfig("standalone", 0, 0), log);
+                ServerConfig.onPorts(0, 0), log);
         node.close();
 
         assertEquals(Lifecycle.STOPPING, node.lifecycle());
@@ -71,7 +71,7 @@ class StandaloneNodeTest {
             }
 
             assertThrows(java.io.IOException.class, () -> StandaloneNode.start(
-                    new ServerConfig("standalone", busy.getLocalPort(), adminPort),
+                    ServerConfig.onPorts(busy.getLocalPort(), adminPort),
                     log));
 
             // The admin server that did bind must have been closed again.
