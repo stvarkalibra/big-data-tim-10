@@ -2,10 +2,12 @@
 package rs.raf.dlsm.common;
 
 import java.util.Objects;
+import java.util.zip.CRC32C;
 
 /**
- * Fixed-width big-endian integer encoding shared by on-disk formats
- * (CP1 §15: documented byte order, fixed-width nonnegative integers).
+ * Fixed-width big-endian integer encoding and CRC32C checksums shared by
+ * on-disk formats (CP1 §15: documented byte order, fixed-width
+ * nonnegative integers, checksums over precisely documented bytes).
  *
  * <p>Unsigned values are returned in a wider Java type so callers never
  * see a negative number for a large stored bit pattern.
@@ -100,6 +102,28 @@ public final class Bin {
         }
 
         return result;
+    }
+
+    /**
+     * CRC32C over exactly {@code data[offset .. offset + length - 1]},
+     * returned as an unsigned u32 value comparable with {@link #getU32}.
+     */
+    public static long crc32c(byte[] data, int offset, int length) {
+        checkRange(data, offset, length);
+
+        CRC32C crc = new CRC32C();
+        crc.update(data, offset, length);
+
+        return crc.getValue();
+    }
+
+    /**
+     * Computes CRC32C over {@code data[from .. from + length - 1]} and
+     * stores it as u32 at {@code crcOffset}.
+     */
+    public static void putCrc32c(
+            byte[] data, int from, int length, int crcOffset) {
+        putU32(data, crcOffset, crc32c(data, from, length));
     }
 
     private static void checkRange(byte[] data, int offset, int width) {
