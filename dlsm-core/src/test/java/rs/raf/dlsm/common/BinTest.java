@@ -3,6 +3,9 @@ package rs.raf.dlsm.common;
 
 import org.junit.jupiter.api.Test;
 
+import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
+
 import static org.junit.jupiter.api.Assertions.*;
 
 class BinTest {
@@ -143,5 +146,104 @@ class BinTest {
                 () -> Bin.getU32(null, 0));
         assertThrows(NullPointerException.class,
                 () -> Bin.putU32(null, 0, 0));
+        assertThrows(NullPointerException.class,
+                () -> Bin.crc32c(null, 0, 0));
+    }
+
+    @Test
+    void crc32cMatchesStandardCheckValue() {
+        byte[] data = "123456789".getBytes(StandardCharsets.US_ASCII);
+
+        assertEquals(0xE306_9283L, Bin.crc32c(data, 0, data.length));
+    }
+
+    // RFC 3720 (iSCSI), appendix B.4 CRC32C test vectors.
+    @Test
+    void crc32cMatchesRfc3720Vectors() {
+        byte[] zeros = new byte[32];
+
+        byte[] ones = new byte[32];
+        Arrays.fill(ones, (byte) 0xFF);
+
+        byte[] ascending = new byte[32];
+        byte[] descending = new byte[32];
+
+        for (int i = 0; i < 32; i++) {
+            ascending[i] = (byte) i;
+            descending[i] = (byte) (31 - i);
+        }
+
+        assertEquals(0x8A91_36AAL, Bin.crc32c(zeros, 0, 32));
+        assertEquals(0x62A8_AB43L, Bin.crc32c(ones, 0, 32));
+        assertEquals(0x46DD_794EL, Bin.crc32c(ascending, 0, 32));
+        assertEquals(0x113F_DB5CL, Bin.crc32c(descending, 0, 32));
+    }
+
+    @Test
+    void crc32cOfEmptyRangeIsZero() {
+        assertEquals(0, Bin.crc32c(new byte[4], 2, 0));
+    }
+
+    @Test
+    void crc32cCoversOnlyRequestedRange() {
+        byte[] check = "123456789".getBytes(StandardCharsets.US_ASCII);
+
+        byte[] padded = new byte[check.length + 6];
+        Arrays.fill(padded, (byte) 0x5A);
+        System.arraycopy(check, 0, padded, 3, check.length);
+
+        assertEquals(0xE306_9283L,
+                Bin.crc32c(padded, 3, check.length));
+
+        padded[0] ^= 0x01;
+        padded[padded.length - 1] ^= 0x01;
+
+        assertEquals(0xE306_9283L,
+                Bin.crc32c(padded, 3, check.length));
+    }
+
+    @Test
+    void crc32cDetectsSingleBitFlip() {
+        byte[] data = "123456789".getBytes(StandardCharsets.US_ASCII);
+        long original = Bin.crc32c(data, 0, data.length);
+
+        for (int bit = 0; bit < data.length * 8; bit++) {
+            data[bit / 8] ^= (byte) (1 << (bit % 8));
+
+            assertNotEquals(original,
+                    Bin.crc32c(data, 0, data.length), "bit " + bit);
+
+            data[bit / 8] ^= (byte) (1 << (bit % 8));
+        }
+    }
+
+    @Test
+    void putCrc32cStoresBigEndianChecksumAtOffset() {
+        byte[] data = new byte[13];
+        byte[] check = "123456789".getBytes(StandardCharsets.US_ASCII);
+        System.arraycopy(check, 0, data, 0, check.length);
+
+        Bin.putCrc32c(data, 0, check.length, 9);
+
+        assertArrayEquals(
+                new byte[]{(byte) 0xE3, 0x06, (byte) 0x92, (byte) 0x83},
+                Arrays.copyOfRange(data, 9, 13));
+        assertEquals(Bin.crc32c(data, 0, 9), Bin.getU32(data, 9));
+    }
+
+    @Test
+    void crc32cRejectsRangeOutsideArray() {
+        byte[] data = new byte[8];
+
+        assertThrows(IndexOutOfBoundsException.class,
+                () -> Bin.crc32c(data, 0, 9));
+        assertThrows(IndexOutOfBoundsException.class,
+                () -> Bin.crc32c(data, 4, 5));
+        assertThrows(IndexOutOfBoundsException.class,
+                () -> Bin.crc32c(data, -1, 2));
+        assertThrows(IndexOutOfBoundsException.class,
+                () -> Bin.crc32c(data, 0, -1));
+        assertThrows(IndexOutOfBoundsException.class,
+                () -> Bin.putCrc32c(data, 0, 4, 5));
     }
 }
