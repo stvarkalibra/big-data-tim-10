@@ -305,6 +305,8 @@ Klasifikacija iz CP1 §14.2. „Stabilni podaci“ su `MANIFEST.json`, bilo koji
 | Ispravan i odgovarajući `node.json`, nema manifesta, nema WAL-a ni SSTable | nastavak inicijalizacije od koraka 3 | — |
 | Ispravan `node.json` i prazan manifest generacije 0, nema upotrebljivog WAL-a | dodela i force novog WAL segmenta | — |
 | Nema `node.json`, a postoje stabilni podaci | `FAILED` | `NODE_IDENTITY_MISMATCH` |
+| Ispravan `node.json`, nema `MANIFEST.json`, a postoji bilo koji WAL segment ili SSTable | `FAILED` | `MANIFEST_INVALID` |
+| Nedostaje obavezni direktorijum (`lsm/`, `lsm/wal/`, `lsm/sst/`, `lsm/tmp/`), a `node.json` ili manifest već postoji | `FAILED` | `DIRECTORY_LAYOUT` |
 | `node.json` je neispravan (JSON, polja, tipovi, nepodržana verzija) | `FAILED` | `NODE_IDENTITY_MISMATCH` |
 | `nodeId` se razlikuje od konfigurisanog `NODE_ID` | `FAILED` | `NODE_IDENTITY_MISMATCH` |
 
