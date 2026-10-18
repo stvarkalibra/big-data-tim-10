@@ -2,10 +2,15 @@
 package rs.raf.dlsm.sstable;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -14,8 +19,33 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class SSTableValidatorTest {
 
+    @TempDir
+    Path directory;
+
+    private Path write(byte[] bytes) {
+        try {
+            Path path = Files.createTempFile(
+                    directory, "sst-", ".sst");
+            Files.write(path, bytes == null ? new byte[0] : bytes);
+            return path;
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
+    private void validate(byte[] bytes, SSTableMeta meta) {
+        SSTableValidator.validateFully(
+                bytes == null ? null : write(bytes), meta);
+    }
+
+    private boolean valid(byte[] bytes, SSTableMeta meta) {
+        return SSTableValidator.isValid(
+                bytes == null ? null : write(bytes), meta);
+    }
+
     private BlockCodec.Record put(
             String key, long sequence, String value) {
+
         return new BlockCodec.Record(
                 key,
                 sequence,
@@ -36,7 +66,9 @@ class SSTableValidatorTest {
         );
     }
 
-    private static long footerLong(byte[] data, int relativeOffset) {
+    private static long footerLong(
+            byte[] data, int relativeOffset) {
+
         int footerStart =
                 data.length - SSTableWriter.FOOTER_BYTES;
 
@@ -50,11 +82,9 @@ class SSTableValidatorTest {
         var result = build();
 
         assertDoesNotThrow(() ->
-                SSTableValidator.validateFully(
-                        result.bytes(), result.meta()));
+                validate(result.bytes(), result.meta()));
 
-        assertTrue(SSTableValidator.isValid(
-                result.bytes(), result.meta()));
+        assertTrue(valid(result.bytes(), result.meta()));
     }
 
     @Test
@@ -63,8 +93,7 @@ class SSTableValidatorTest {
 
         var exception = assertThrows(
                 SSTableValidator.ValidationException.class,
-                () -> SSTableValidator.validateFully(
-                        null, result.meta()));
+                () -> validate(null, result.meta()));
 
         assertEquals(
                 SSTableValidator.Category.TRUNCATED_REGION,
@@ -77,8 +106,7 @@ class SSTableValidatorTest {
 
         var exception = assertThrows(
                 SSTableValidator.ValidationException.class,
-                () -> SSTableValidator.validateFully(
-                        result.bytes(), null));
+                () -> validate(result.bytes(), null));
 
         assertEquals(
                 SSTableValidator.Category.MANIFEST_TABLE_MISMATCH,
@@ -92,13 +120,11 @@ class SSTableValidatorTest {
 
         data[0] ^= 0x01;
 
-        assertFalse(SSTableValidator.isValid(
-                data, result.meta()));
+        assertFalse(valid(data, result.meta()));
 
         var exception = assertThrows(
                 SSTableValidator.ValidationException.class,
-                () -> SSTableValidator.validateFully(
-                        data, result.meta()));
+                () -> validate(data, result.meta()));
 
         assertEquals(
                 SSTableValidator.Category.HEADER,
@@ -114,8 +140,7 @@ class SSTableValidatorTest {
 
         assertThrows(
                 SSTableValidator.ValidationException.class,
-                () -> SSTableValidator.validateFully(
-                        data, result.meta()));
+                () -> validate(data, result.meta()));
     }
 
     @Test
@@ -130,8 +155,7 @@ class SSTableValidatorTest {
 
         assertThrows(
                 SSTableValidator.ValidationException.class,
-                () -> SSTableValidator.validateFully(
-                        data, result.meta()));
+                () -> validate(data, result.meta()));
     }
 
     @Test
@@ -146,8 +170,7 @@ class SSTableValidatorTest {
 
         assertThrows(
                 SSTableValidator.ValidationException.class,
-                () -> SSTableValidator.validateFully(
-                        data, result.meta()));
+                () -> validate(data, result.meta()));
     }
 
     @Test
@@ -159,8 +182,7 @@ class SSTableValidatorTest {
 
         assertThrows(
                 SSTableValidator.ValidationException.class,
-                () -> SSTableValidator.validateFully(
-                        data, result.meta()));
+                () -> validate(data, result.meta()));
     }
 
     @Test
@@ -173,8 +195,7 @@ class SSTableValidatorTest {
 
         assertThrows(
                 SSTableValidator.ValidationException.class,
-                () -> SSTableValidator.validateFully(
-                        truncated, result.meta()));
+                () -> validate(truncated, result.meta()));
     }
 
     @Test
@@ -195,8 +216,7 @@ class SSTableValidatorTest {
 
         var exception = assertThrows(
                 SSTableValidator.ValidationException.class,
-                () -> SSTableValidator.validateFully(
-                        result.bytes(), wrong));
+                () -> validate(result.bytes(), wrong));
 
         assertEquals(
                 SSTableValidator.Category.MANIFEST_TABLE_MISMATCH,
@@ -220,8 +240,7 @@ class SSTableValidatorTest {
                 5, records.iterator(), records.size());
 
         assertDoesNotThrow(() ->
-                SSTableValidator.validateFully(
-                        result.bytes(), result.meta()));
+                validate(result.bytes(), result.meta()));
 
         SSTableReader reader =
                 SSTableReader.open(result.bytes(), result.meta());
@@ -232,10 +251,8 @@ class SSTableValidatorTest {
     @Test
     void rejectsOversizedOrInvalidInput() {
         var result = build();
-
         byte[] empty = new byte[0];
 
-        assertFalse(SSTableValidator.isValid(
-                empty, result.meta()));
+        assertFalse(valid(empty, result.meta()));
     }
 }

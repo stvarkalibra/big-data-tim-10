@@ -2,8 +2,12 @@
 package rs.raf.dlsm.sstable;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
-import java.nio.charset.StandardCharsets;
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -12,6 +16,20 @@ import java.util.Random;
 import static org.junit.jupiter.api.Assertions.*;
 
 class SSTableHardeningTest {
+
+    @TempDir
+    Path directory;
+
+    private void validate(byte[] bytes, SSTableMeta expected) {
+        try {
+            Path file = Files.createTempFile(
+                    directory, "sst-", ".sst");
+            Files.write(file, bytes);
+            SSTableValidator.validateFully(file, expected);
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
 
     private static BlockCodec.Record put(
             String key, long sequence, byte[] value) {
@@ -140,7 +158,9 @@ class SSTableHardeningTest {
 
         assertTrue(reader.blockCount() >= 100);
 
-        for (int i : new int[]{0, 1, 2500, 5000, 7500, 9999}) {
+        for (int i : new int[]{
+                0, 1, 2500, 5000, 7500, 9999}) {
+
             assertTrue(reader.get(
                     String.format("k%05d", i)).isPresent());
         }
@@ -208,8 +228,7 @@ class SSTableHardeningTest {
             corrupted[position] ^= 0x01;
 
             assertThrows(IllegalArgumentException.class,
-                    () -> SSTableValidator.validateFully(
-                            corrupted, table.meta()));
+                    () -> validate(corrupted, table.meta()));
         }
     }
 
@@ -234,8 +253,7 @@ class SSTableHardeningTest {
             byte[] truncated = Arrays.copyOf(original, length);
 
             assertThrows(IllegalArgumentException.class,
-                    () -> SSTableValidator.validateFully(
-                            truncated, table.meta()));
+                    () -> validate(truncated, table.meta()));
         }
     }
 
@@ -251,8 +269,7 @@ class SSTableHardeningTest {
         assertEquals(500, table.meta().maxSequence());
 
         assertDoesNotThrow(() ->
-                SSTableValidator.validateFully(
-                        table.bytes(), table.meta()));
+                validate(table.bytes(), table.meta()));
     }
 
     @Test
