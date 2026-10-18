@@ -140,6 +140,48 @@ public final class WalCodec {
         return frame;
     }
 
+    /**
+     * Steps 2–3 of FORMAT.md §3.4: validates the 8-byte guarded frame header
+     * at {@code offset} and returns {@code totalFrameLength}, which is then
+     * safe to allocate. The caller must first check that 8 bytes exist
+     * (step 1) and afterwards that the whole frame fits in the file (step 4);
+     * both of those failures mean a torn tail, not corruption.
+     *
+     * <p>The complement is checked before the length bounds and before EOF,
+     * so a damaged length can never pose as a torn tail (CP1-WAL-003).
+     */
+    public static int checkFrameGuard(byte[] data, int offset)
+            throws StorageException {
+
+        Objects.requireNonNull(data, "data");
+        if (!Bin.fitsWithin(offset, FRAME_GUARD_BYTES, data.length)) {
+            throw new IllegalArgumentException(
+                    "Guarded frame header needs " + FRAME_GUARD_BYTES
+                            + " bytes; classify a shorter tail first");
+        }
+
+        long total = Bin.getU32(data, offset + FRAME_LENGTH_OFFSET);
+        long complement = Bin.getU32(data, offset + FRAME_LENGTH_COMPLEMENT_OFFSET);
+
+        if (complement != (total ^ Bin.U32_MAX)) {
+            throw lengthGuardError(
+                    "Frame length complement mismatch", null);
+        }
+
+        try {
+            return Bin.checkLength(total, MIN_FRAME_BYTES, MAX_FRAME_BYTES);
+        } catch (IllegalArgumentException e) {
+            throw lengthGuardError("Frame length " + total + " outside ["
+                    + MIN_FRAME_BYTES + ", " + MAX_FRAME_BYTES + "]", e);
+        }
+    }
+
+    private static StorageException lengthGuardError(
+            String message, Throwable cause) {
+        return new StorageException(
+                ErrorCode.STORAGE_IO, CATEGORY_LENGTH_GUARD, message, cause);
+    }
+
     private static StorageException headerError(String message) {
         return new StorageException(
                 ErrorCode.STORAGE_IO, CATEGORY_HEADER, message);
