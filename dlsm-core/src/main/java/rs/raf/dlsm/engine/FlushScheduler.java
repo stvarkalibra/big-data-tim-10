@@ -21,6 +21,10 @@ public interface FlushScheduler {
      */
     void checkAutoCompaction();
 
+    /** Stops the worker; called once by {@code Engine.close()}. Must not throw. */
+    default void close() {
+    }
+
     /** Does nothing: for an engine running without a maintenance worker. */
     FlushScheduler NONE = new FlushScheduler() {
         @Override

@@ -20,7 +20,7 @@ import java.util.concurrent.RejectedExecutionException;
  * enqueues, as {@link FlushScheduler} requires. No compaction: tables
  * accumulate, which is acceptable for an in-memory milestone node.
  */
-public final class InMemoryFlusher implements FlushScheduler, AutoCloseable {
+public final class InMemoryFlusher implements FlushScheduler {
 
     private final MaintenanceHost host;
     private final ExecutorService worker = Executors.newSingleThreadExecutor(task -> {
