@@ -266,17 +266,25 @@ public interface StorageEngine extends AutoCloseable {
 // SCAN zatim filtrira tombstone i primenjuje limit/end. Compaction (Ilija) zadržava tombstone.
 public final class MergingIterator implements Iterator<InternalRecord> { ... }
 
-// Šav engine <-> održavanje (Mladen obezbeđuje, Ilija koristi)
+// Šav engine <-> održavanje (Mladen obezbeđuje, Ilija koristi). Usklađeno sa kodom 18.10.2026.
+// (docs/ODLUKE.md); merodavan je javadoc u dlsm-core/.../engine/MaintenanceHost.java.
 public interface MaintenanceHost {
-    long maxSequenceInEngine();                               // targetSequence za ručni flush
-    void rotateIfActiveContainsUpTo(long target, OpContext c);// ručni flush: rotacija aktivne
+    long maxSequenceInEngine(OpContext ctx) throws StorageException;        // targetSequence za ručni flush
+    boolean rotateIfActiveContainsUpTo(long target, OpContext ctx)          // ručni flush: rotacija aktivne;
+            throws StorageException;                                        // greška ako immutable već postoji
     Optional<FlushInput> oldestImmutable();                   // FIFO; zapisi + walSegmentIds + maxSeq
-    EngineView currentView();                                 // nepromenljiv snimak izvora
-    <T> T underEngineWriteLock(Callable<T> step) throws Exception;   // objava + zamena pogleda
-    void installFlushResult(SSTableReader table, Manifest published); // povlači immutable, budi pisce
-    void installCompactionResult(Set<Long> removedIds, SSTableReader out, Manifest published);
+    EngineView currentView();                                 // nepromenljiv snimak: immutable + objavljene tabele
+    <T> T underEngineWriteLock(OpContext ctx, Callable<T> step) throws Exception; // objava manifesta + zamena pogleda
+    void installFlushResult(long memtableGeneration, TableSource table);    // povlači immutable, budi pisce
+    void installCompactionResult(Set<Long> inputTableIds, TableSource output);
 }
-public interface FlushScheduler { void flushNeeded(); void checkAutoCompaction(); } // Ilija obezbeđuje
+public interface FlushScheduler { void flushNeeded(); void checkAutoCompaction(); } // Ilija obezbeđuje; ne sme da blokira
+// Objavljena SSTable kako je engine čita; Kimijev SSTableReader je implementira.
+public interface TableSource {
+    SSTableMeta meta();
+    Optional<InternalRecord> get(String key) throws StorageException;            // kandidat, može biti tombstone
+    Iterator<InternalRecord> iterator(String startInclusive) throws StorageException; // pozicioniran kroz retki indeks
+}   // oštećenje: StorageException (STORAGE_IO + kategorija), u iteratoru UncheckedStorageException; nikad prazan rezultat
 
 // ===== io + failpoint (Andrija) =====
 public interface StorageIO {   // fpBefore = ime failpoint-a koji se pogađa NEPOSREDNO pre stvarnog poziva (ili null)
