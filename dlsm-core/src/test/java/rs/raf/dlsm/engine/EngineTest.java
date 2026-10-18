@@ -33,6 +33,15 @@ class EngineTest {
         private long lastAppended;
 
         @Override
+        public long segmentId() {
+            return 1;
+        }
+
+        @Override
+        public void close() {
+        }
+
+        @Override
         public void append(InternalRecord record, OpContext ctx) throws IOException {
             if (failAppend) {
                 throw new IOException("injected append failure");
@@ -232,6 +241,15 @@ class EngineTest {
 
         MutationLog log = new MutationLog() {
             @Override
+            public long segmentId() {
+                return 1;
+            }
+
+            @Override
+            public void close() {
+            }
+
+            @Override
             public void append(InternalRecord record, OpContext ctx) {
             }
 
@@ -364,7 +382,7 @@ class EngineTest {
 
     @Test
     void exhaustedSequencesMoveToFailed() throws StorageException {
-        Engine engine = new Engine(CONFIG, MutationLog.NONE,
+        Engine engine = new Engine(CONFIG, new InMemoryWal().createSegment(ctx()),
                 SequenceAllocator.after(Long.MAX_VALUE - 1));
 
         assertEquals(Long.MAX_VALUE, engine.put("a", bytes("1"), ctx()).sequence());

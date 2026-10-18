@@ -34,42 +34,66 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
  * (corruption, I/O) moves the engine to {@code FAILED}; it is never turned
  * into "not found" (I7, CP1 §22).
  *
+ * <p>The active MemTable and its WAL segment form one pair that rotation
+ * replaces as a whole (CP1 §10): a full generation is frozen into the view
+ * and handed to the flush worker through {@link FlushScheduler}.
+ *
  * <p>Not yet here: backpressure, recovery, failpoints and statistics.
  * Their places are marked in the code.
  */
 public final class Engine implements StorageEngine {
 
+    /** For engines built without rotation support (tests of other parts). */
+    private static final WalFactory NO_ROTATION = ctx -> {
+        throw new IOException("This engine was built without a WAL factory");
+    };
+
     private final ReentrantReadWriteLock engineLock = new ReentrantReadWriteLock(true);
-    private final MutationLog log;
+    private final long memtableMaxBytes;
+    private final WalFactory walFactory;
     private final SequenceAllocator sequences;
     private final Object failureLock = new Object();
+    private volatile FlushScheduler flushScheduler = FlushScheduler.NONE;
 
-    /** Guarded by engineLock. */
+    /** The active pair (CP1 §10): changed only together, under the write lock. */
     private MemTable active;
-    /** Guarded by engineLock; replaced as a whole, never modified. */
-    private EngineView view;
+    private MutationLog activeLog;
+    /**
+     * Replaced as a whole under the write lock, never modified; volatile so
+     * maintenance can read the current view without locking.
+     */
+    private volatile EngineView view;
 
     /** Written under a lock; volatile so health can read it without locking. */
     private volatile EngineMode mode;
     private volatile StorageException lastFatalError;
 
-    Engine(EngineConfig config, MutationLog log, SequenceAllocator sequences) {
-        this(config, log, sequences, EngineView.EMPTY);
+    Engine(EngineConfig config, MutationLog activeLog, SequenceAllocator sequences) {
+        this(config, NO_ROTATION, activeLog, sequences, EngineView.EMPTY);
+    }
+
+    Engine(EngineConfig config, MutationLog activeLog, SequenceAllocator sequences,
+           EngineView initialView) {
+        this(config, NO_ROTATION, activeLog, sequences, initialView);
     }
 
     /**
+     * @param walFactory  creates the next WAL segment on rotation
+     * @param activeLog   the durable, empty segment the active MemTable uses
      * @param initialView published tables (and, after recovery, the
      *                    recovered frozen generation) to start from
      */
-    Engine(EngineConfig config, MutationLog log, SequenceAllocator sequences,
-           EngineView initialView) {
+    Engine(EngineConfig config, WalFactory walFactory, MutationLog activeLog,
+           SequenceAllocator sequences, EngineView initialView) {
         Objects.requireNonNull(config, "config");
-        this.log = Objects.requireNonNull(log, "log");
+        this.memtableMaxBytes = config.memtableMaxBytes();
+        this.walFactory = Objects.requireNonNull(walFactory, "walFactory");
+        this.activeLog = Objects.requireNonNull(activeLog, "activeLog");
         this.sequences = Objects.requireNonNull(sequences, "sequences");
         this.view = Objects.requireNonNull(initialView, "initialView");
         long generation = initialView.immutable() == null
                 ? 1 : initialView.immutable().generation() + 1;
-        this.active = new MemTable(generation, config.memtableMaxBytes());
+        this.active = new MemTable(generation, memtableMaxBytes);
         this.mode = EngineMode.SERVING;
     }
 
@@ -78,7 +102,17 @@ public final class Engine implements StorageEngine {
      * restart. Used until the WAL and recovery are wired in (milestone M1).
      */
     public static Engine openInMemory(EngineConfig config) {
-        return new Engine(config, MutationLog.NONE, SequenceAllocator.forNewDatabase());
+        InMemoryWal wal = new InMemoryWal();
+        return new Engine(config, wal, wal.createSegment(OpContext.background()),
+                SequenceAllocator.forNewDatabase(), EngineView.EMPTY);
+    }
+
+    /**
+     * Connects the maintenance worker, which is created after the engine
+     * because it needs the engine as its {@link MaintenanceHost}.
+     */
+    public void setFlushScheduler(FlushScheduler scheduler) {
+        this.flushScheduler = Objects.requireNonNull(scheduler, "scheduler");
     }
 
     @Override
@@ -108,8 +142,14 @@ public final class Engine implements StorageEngine {
         acquire(writeLock, ctx);                                  // step 2
         try {
             requireMode("Engine does not accept mutations");      // step 3
-            // TODO(rotation): if the active MemTable requires rotation, rotate
-            // it, or wait on backpressure while an immutable one exists (CP1 §10).
+            // CP1 §10: a full active generation must rotate before the next
+            // mutation appends. If rotation fails this mutation fails too, and
+            // the old pair stays current.
+            if (active.rotationRequired() && view.immutable() == null) {
+                rotateLocked(ctx);
+            }
+            // TODO(backpressure): while a frozen generation still waits for
+            // flush, wait here (bounded by the deadline) instead of growing.
 
             long sequence;
             try {
@@ -120,9 +160,9 @@ public final class Engine implements StorageEngine {
             InternalRecord record = new InternalRecord(key, sequence, kind, value);
 
             try {
-                log.append(record, ctx);                          // steps 5–6
+                activeLog.append(record, ctx);                    // steps 5–6
                 // Durability boundary and linearization point (CP1 §9.2).
-                log.force(ctx);                                   // step 7
+                activeLog.force(ctx);                             // step 7
             } catch (IOException e) {
                 // The WAL tail is now uncertain: never append behind it.
                 throw fail(new StorageException(ErrorCode.STORAGE_IO, null,
@@ -143,6 +183,86 @@ public final class Engine implements StorageEngine {
         } finally {
             // Step 9: readers see the record once the write lock is released.
             writeLock.unlock();                                   // step 10
+        }
+    }
+
+    /**
+     * Rotation (CP1 §10). The caller holds the write lock; no frozen
+     * generation may exist and the active one must hold records.
+     */
+    private void rotateLocked(OpContext ctx) throws StorageException {
+        if (view.immutable() != null) {
+            throw new IllegalStateException("A frozen generation already waits for flush");
+        }
+        if (active.isEmpty()) {
+            throw new IllegalStateException("An empty generation is never rotated");
+        }
+
+        // Step 1: the new segment is created, forced and finalized before
+        // anything may be appended to it. On failure the old pair stays.
+        MutationLog nextLog;
+        try {
+            nextLog = walFactory.createSegment(ctx);
+        } catch (IOException e) {
+            throw new StorageException(ErrorCode.STORAGE_IO, null,
+                    "Cannot create a new WAL segment", e);
+        }
+        // failpoint: rotation.after-new-wal-sync.before-switch
+
+        // Step 2: freeze the old generation together with its WAL segment.
+        ImmutableMemTable frozen = active.freeze(List.of(activeLog.segmentId()));
+        MutationLog previousLog = activeLog;
+
+        // Step 3: swap the pair as one change: the linearization point of
+        // rotation. Writers after this use only the new pair.
+        active = new MemTable(active.generation() + 1, memtableMaxBytes);
+        activeLog = nextLog;
+        view = new EngineView(frozen, view.tables());
+        previousLog.close();
+        // failpoint: rotation.after-switch.before-flush
+
+        // Step 4: hand the frozen generation to the flush worker.
+        flushScheduler.flushNeeded();
+    }
+
+    /**
+     * {@link MaintenanceHost#maxSequenceInEngine}: the manual flush target
+     * (CP1 §23.1), tombstones included; 0 when the engine holds nothing.
+     */
+    public long maxSequenceInEngine(OpContext ctx) throws StorageException {
+        Lock readLock = engineLock.readLock();
+        acquire(readLock, ctx);
+        try {
+            requireMode("Engine is not serving");
+            return Math.max(active.maxSequence().orElse(0), view.maxSequence());
+        } finally {
+            readLock.unlock();
+        }
+    }
+
+    /** {@link MaintenanceHost#currentView}: frozen generation and published tables. */
+    public EngineView currentView() {
+        return view;
+    }
+
+    /** {@link MaintenanceHost#rotateIfActiveContainsUpTo}. */
+    public boolean rotateIfActiveContainsUpTo(long targetSequence, OpContext ctx)
+            throws StorageException {
+        Lock writeLock = engineLock.writeLock();
+        acquire(writeLock, ctx);
+        try {
+            requireMode("Engine is not serving");
+            if (view.immutable() != null) {
+                throw new IllegalStateException(
+                        "Flush the frozen generation first (FIFO, at most one)");
+            }
+            if (active.isEmpty() || active.minSequence().getAsLong() > targetSequence) {
+                return false; // nothing at or below the target is in the active generation
+            }
+            rotateLocked(ctx);
+            return true;
+        } finally {
+            writeLock.unlock();
         }
     }
 

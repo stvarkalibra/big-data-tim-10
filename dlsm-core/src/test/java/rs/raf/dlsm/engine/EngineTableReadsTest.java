@@ -29,7 +29,7 @@ class EngineTableReadsTest {
     /** An engine over published tables whose next sequence follows them. */
     private static Engine engine(FakeTable... tables) {
         EngineView view = new EngineView(null, List.of(tables));
-        return new Engine(EngineConfig.defaults(), MutationLog.NONE,
+        return new Engine(EngineConfig.defaults(), new InMemoryWal().createSegment(ctx()),
                 SequenceAllocator.after(view.maxSequence()), view);
     }
 
