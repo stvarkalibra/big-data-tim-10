@@ -262,6 +262,94 @@ dužina=35    komplement   ver=1  PUT rez redni broj = 3           k=5    v=0   
 | bajt `55` (vrednost `A`) promenjen iz `41` u `42` | `CORRUPT`, `CHECKSUM` na `24` | struktura je ispravna, CRC nije (korak 8) |
 | bajt `20` (CRC zaglavlja) promenjen | `CORRUPT`, `WAL_HEADER` na `0` | CRC zaglavlja segmenta ne odgovara (§3.2) |
 
+### 3.7 Pregled: `inspect wal`
+
+`./dbctl inspect wal` prikazuje ceo WAL zaustavljenog volumena (CP1 §25). Implementacija je `rs.raf.dlsm.inspect.InspectWal.run(dataDir, out)`; čita isključivo kroz produkcioni `WalReader`, pa klasifikuje tačno kao oporavak (§3.4, §3.5).
+
+**Samo čita.** Ne skraćuje nepotpun završetak, ne briše privremene ni nepoznate fajlove, ne popravlja oštećenje i ne pokreće čišćenje iz oporavka. Bajtovi vrednosti se nikad ne ispisuju, samo njihova dužina.
+
+**Izlaz** je jedan JSON objekat (UTF-8, polja uvek istim redom):
+
+| Polje | Značenje |
+|---|---|
+| `walDirectory` | uvek `lsm/wal`, relativno u odnosu na trajni direktorijum |
+| `status` | `VALID`, `TORN_TAIL` ili `CORRUPT` za ceo WAL; `MISSING` ili `IO_ERROR` kada pregled ne može da se izvrši |
+| `segmentCount`, `recordCount`, `lastSequence` | broj segmenata, broj ispravnih zapisa i najveći ispravan redni broj (`null` bez zapisa) |
+| `tornSegmentId`, `corruptSegmentId` | segment sa nepotpunim završetkom ili sa oštećenjem, inače `null` |
+| `otherFiles` | fajlovi u `wal/` koji nisu `wal-<id>.log`, sortirani po imenu |
+| `temporarySegments` | zaostali `wal-<id>.log.tmp` u `lsm/tmp/`, sortirani po imenu |
+| `segments` | jedan objekat po segmentu, po rastućem numeričkom ID-ju |
+
+Svaki segment sadrži: `file`, `segmentId`, sirova polja zaglavlja (`headerMagic` u heksu, `format`, `formatVersion`, `headerSegmentId`), `headerCrcStatus` (`VALID`, `INVALID` ili `TRUNCATED`), `sizeBytes`, `status`, `validLength`, `tornTail` (`frameOffset`, `eof`, `strayBytes`) ili `null`, `corruption` (`offset`, `category`, `message`) ili `null`, `recordCount`, `minSequence`, `maxSequence` i `records`. Segmenti iza prvog oštećenog dobijaju `status: NOT_SCANNED` i ne dekodiraju se.
+
+Svaki zapis u `records` sadrži `offset` i `length` okvira u fajlu, `sequence`, `kind` (`PUT` ili `DELETE`), `key`, `tombstone`, `valueLength` i `crcStatus` (uvek `VALID`, jer se navode samo ispravni okviri). **Tombstone ima `tombstone: true` i `valueLength: null`; prazna vrednost ima `tombstone: false` i `valueLength: 0`.**
+
+**Izlazni kodovi:**
+
+| Kod | Kada |
+|---:|---|
+| `0` | `VALID` ili `TORN_TAIL`; nepotpun završetak se prijavljuje, ali je pregled uspešan |
+| `1` | `CORRUPT`, uključujući nepodržanu verziju formata |
+| `2` | `lsm/wal` ne postoji (`MISSING`) |
+| `3` | čitanje nije uspelo iz drugog razloga (`IO_ERROR`) |
+
+**Primer:** segment iz §3.6 skraćen na 120 bajtova. Izlazni kod je `0`.
+
+```json
+{
+  "walDirectory" : "lsm/wal",
+  "format" : "LSMWAL01",
+  "status" : "TORN_TAIL",
+  "segmentCount" : 1,
+  "recordCount" : 2,
+  "lastSequence" : 2,
+  "tornSegmentId" : 1,
+  "corruptSegmentId" : null,
+  "otherFiles" : [ ],
+  "temporarySegments" : [ ],
+  "segments" : [ {
+    "file" : "wal-00000000000000000001.log",
+    "segmentId" : 1,
+    "headerMagic" : "4C 53 4D 57 41 4C 30 31",
+    "format" : "LSMWAL01",
+    "formatVersion" : 1,
+    "headerSegmentId" : 1,
+    "headerCrcStatus" : "VALID",
+    "sizeBytes" : 120,
+    "status" : "TORN_TAIL",
+    "validLength" : 94,
+    "tornTail" : {
+      "frameOffset" : 94,
+      "eof" : 120,
+      "strayBytes" : 26
+    },
+    "corruption" : null,
+    "recordCount" : 2,
+    "minSequence" : 1,
+    "maxSequence" : 2,
+    "records" : [ {
+      "offset" : 24,
+      "length" : 36,
+      "sequence" : 1,
+      "kind" : "PUT",
+      "key" : "alpha",
+      "tombstone" : false,
+      "valueLength" : 1,
+      "crcStatus" : "VALID"
+    }, {
+      "offset" : 60,
+      "length" : 34,
+      "sequence" : 2,
+      "kind" : "DELETE",
+      "key" : "beta",
+      "tombstone" : true,
+      "valueLength" : null,
+      "crcStatus" : "VALID"
+    } ]
+  } ]
+}
+```
+
 ## 4. `node.json` i `LOCK`
 
 ### 4.1 `node.json`
