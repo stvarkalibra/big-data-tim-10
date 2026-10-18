@@ -1,5 +1,8 @@
 package rs.raf.dlsm.inspect;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectWriter;
 import rs.raf.dlsm.common.Bin;
 import rs.raf.dlsm.common.InternalRecord;
 import rs.raf.dlsm.wal.WalFileNames;
@@ -10,6 +13,7 @@ import rs.raf.dlsm.wal.WalScanResult;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.PrintStream;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
@@ -38,7 +42,59 @@ public final class InspectWal {
 
     static final String NOT_SCANNED = "NOT_SCANNED";
 
+    /** {@code VALID} or {@code TORN_TAIL}: a torn tail is reported, not an error (CP1 §25). */
+    public static final int EXIT_OK = 0;
+    /** A corrupt header or frame, including an unsupported format version. */
+    public static final int EXIT_CORRUPT = 1;
+    /** The requested object does not exist, e.g. no {@code lsm/wal} directory. */
+    public static final int EXIT_MISSING = 2;
+    /** Reading failed for a reason other than corruption. */
+    public static final int EXIT_IO_ERROR = 3;
+
+    private static final ObjectWriter JSON = new ObjectMapper()
+            .writerWithDefaultPrettyPrinter();
+
     private InspectWal() {
+    }
+
+    /**
+     * Entry point for {@code dbctl inspect wal}: prints the report of
+     * {@link #inspectLog} as JSON to {@code out} and returns the exit code.
+     * Errors are reported as JSON too, without stack traces or absolute
+     * paths, so the output stays machine-readable.
+     */
+    public static int run(Path dataDir, PrintStream out) {
+        Map<String, Object> report;
+        int exitCode;
+
+        try {
+            report = inspectLog(dataDir);
+            exitCode = WalScanResult.Status.CORRUPT.name().equals(report.get("status"))
+                    ? EXIT_CORRUPT
+                    : EXIT_OK;
+        } catch (NoSuchFileException e) {
+            report = error("MISSING", "WAL directory not found: " + WAL_DIR);
+            exitCode = EXIT_MISSING;
+        } catch (IOException e) {
+            report = error("IO_ERROR", "Reading the WAL failed: " + e.getClass().getSimpleName());
+            exitCode = EXIT_IO_ERROR;
+        }
+
+        try {
+            out.println(JSON.writeValueAsString(report));
+        } catch (JsonProcessingException e) {
+            // Only plain maps, lists, strings and numbers are serialized here.
+            throw new IllegalStateException("Inspection report is not serializable", e);
+        }
+        return exitCode;
+    }
+
+    private static Map<String, Object> error(String status, String message) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("walDirectory", WAL_DIR);
+        result.put("status", status);
+        result.put("message", message);
+        return result;
     }
 
     /** Report for one segment file named {@code wal-<id>.log}. */
