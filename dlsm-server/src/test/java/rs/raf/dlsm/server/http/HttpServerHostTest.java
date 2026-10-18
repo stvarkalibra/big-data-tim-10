@@ -61,6 +61,9 @@ class HttpServerHostTest {
                 })
                 .add("GET", "/bug", (req, ctx) -> {
                     throw new IllegalStateException("/secret/abs/path broke");
+                })
+                .add("GET", "/error", (req, ctx) -> {
+                    throw new NoClassDefFoundError("com/example/Missing");
                 });
 
         InetSocketAddress any = new InetSocketAddress(
@@ -196,6 +199,25 @@ class HttpServerHostTest {
         String logs = logOutput.toString(StandardCharsets.UTF_8);
         assertTrue(logs.contains("\"event\":\"HTTP_INTERNAL_ERROR\""));
         assertTrue(logs.contains("\"requestId\":\"b-1\""));
+    }
+
+    @Test
+    void errorInHandlerStillAnswersAndClosesTheExchange() throws Exception {
+        // Regression: an Error (not an Exception) used to leave the
+        // exchange open, so the client waited forever.
+        HttpRequest request = HttpRequest.newBuilder(
+                        URI.create("http://127.0.0.1:" + publicHost.port() + "/error"))
+                .header("X-Request-Id", "err-1")
+                .timeout(java.time.Duration.ofSeconds(5))
+                .build();
+        HttpResponse<String> r = client.send(request, HttpResponse.BodyHandlers.ofString());
+
+        assertEquals(500, r.statusCode());
+        assertEquals("INTERNAL_ERROR", json(r).get("code").asText());
+        assertFalse(r.body().contains("Missing"));
+
+        // The server keeps serving afterwards.
+        assertEquals(200, send(publicHost, "GET", "/echo/a", "err-2", null).statusCode());
     }
 
     @Test
