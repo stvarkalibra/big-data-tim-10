@@ -92,6 +92,37 @@ Redosled provere pri čitanju: dužina fajla (najmanje 24 bajta) → CRC zaglavl
 
 To važi i za konačni segment kraći od 24 bajta. Protokol iz §3.1 dobija konačno ime tek posle force-a kompletnog zaglavlja, pa skraćeno zaglavlje ne može nastati padom i ne tretira se kao nepotpun završetak.
 
+### 3.3 Okvir zapisa
+
+Jedna mutacija (`PUT` ili `DELETE`) je tačno jedan okvir. Oznake `k` i `v` su dužine ključa i vrednosti u bajtovima. Ukupna dužina okvira je `30 + k + v`.
+
+| Offset | Veličina | Polje | Tip | Validacija |
+|---:|---:|---|---|---|
+| `0` | `4` | `totalFrameLength` | `u32` | `31..262302` i tačno `30 + k + v`. |
+| `4` | `4` | komplement dužine | `u32` | Tačno `totalFrameLength XOR 0xFFFFFFFF`. |
+| `8` | `2` | verzija zapisa | `u16` | Tačno `1`. |
+| `10` | `1` | vrsta | `u8` | `1` = `PUT`, `2` = `DELETE`. |
+| `11` | `1` | rezervisano | `u8` | Tačno `0` u verziji 1. |
+| `12` | `8` | `mutationSequence` | `i64` | Pozitivan; strogo raste kroz ceo WAL (§3.4). |
+| `20` | `2` | dužina ključa `k` | `u16` | `1..128`. |
+| `22` | `4` | dužina vrednosti `v` | `u32` | `0..262144` za `PUT`; tačno `0` za `DELETE`. |
+| `26` | `k` | bajtovi ključa | ASCII | Važeći ključ projekta (§1). |
+| `26 + k` | `v` | bajtovi vrednosti | bajtovi | Samo za `PUT`; prazan `PUT` ima `v = 0`. |
+| `26 + k + v` | `4` | CRC32C zapisa | `u32` | CRC32C nad bajtovima `8..(25 + k + v)`. |
+
+Prvih 8 bajtova (dužina i njen komplement) čine **zaštićeno zaglavlje okvira**. Ono omogućava da se dužina proveri pre nego što joj se poveruje (§3.4).
+
+**Šta pokriva CRC zapisa** (TEAM CHOICE iz CP1 §16.3): bajtove od verzije zapisa do poslednjeg bajta ključa ili vrednosti, dakle vrstu, redni broj, obe dužine, ključ i vrednost. Zaštićeno zaglavlje (bajtovi `0..7`) **nije** pokriveno CRC-om; njega štiti komplement, a dodatno ga vezuje uslov `totalFrameLength = 30 + k + v`, jer su `k` i `v` pod CRC-om.
+
+**Granice veličine okvira:**
+
+| Slučaj | `k` | `v` | `totalFrameLength` |
+|---|---:|---:|---:|
+| Najmanji okvir (`DELETE` ili prazan `PUT` sa ključem od 1 bajta) | `1` | `0` | `31` |
+| Najveći okvir (`PUT`, najduži ključ i najveća vrednost) | `128` | `262144` | `262302` |
+
+**`DELETE` i prazan `PUT`** imaju isti raspored i istu dužinu (`v = 0`); razlikuje ih samo polje vrsta. Tombstone je pravi zapis sa sopstvenim rednim brojem, ne prazna vrednost (CP1 I8). Kodovi vrste `1`/`2` isti su kao u SSTable bloku podataka.
+
 ## SSTable — Bloom Filter Format (Version 1)
 
 ### Parameters
