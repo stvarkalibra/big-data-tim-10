@@ -6,7 +6,6 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Iterator;
 import java.util.List;
 import java.util.zip.CRC32C;
@@ -16,8 +15,8 @@ public final class SSTableWriter {
     public static final int HEADER_BYTES = 16;
     public static final int FOOTER_BYTES = 384;
 
-    private static final int HEADER_MAGIC = 0x53535431; // SST1
-    private static final int FOOTER_MAGIC = 0x46545231; // FTR1
+    private static final int HEADER_MAGIC = 0x53535431;
+    private static final int FOOTER_MAGIC = 0x46545231;
     private static final int VERSION = 1;
     private static final int KEY_FIELD_BYTES = 128;
 
@@ -25,6 +24,7 @@ public final class SSTableWriter {
     }
 
     public record Result(SSTableMeta meta, byte[] bytes) {
+
         public Result {
             if (meta == null || bytes == null) {
                 throw new IllegalArgumentException("Null result");
@@ -44,10 +44,12 @@ public final class SSTableWriter {
             long expectedEntries) {
 
         if (tableId <= 0 || records == null || expectedEntries <= 0) {
-            throw new IllegalArgumentException("Invalid builder arguments");
+            throw new IllegalArgumentException(
+                    "Invalid builder arguments");
         }
 
-        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        ByteArrayOutputStream output =
+                new ByteArrayOutputStream();
 
         ByteBuffer header = ByteBuffer.allocate(HEADER_BYTES)
                 .order(ByteOrder.BIG_ENDIAN);
@@ -60,12 +62,15 @@ public final class SSTableWriter {
         SparseIndex index = new SparseIndex();
         BloomFilter bloom = new BloomFilter(expectedEntries);
 
-        List<BlockCodec.Record> currentBlock = new ArrayList<>();
+        List<BlockCodec.Record> currentBlock =
+                new ArrayList<>();
+
         int currentPayloadBytes = 0;
 
         String minKey = null;
         String maxKey = null;
         String previousKey = null;
+
         long minSequence = Long.MAX_VALUE;
         long maxSequence = 0;
         long entryCount = 0;
@@ -100,25 +105,33 @@ public final class SSTableWriter {
             }
 
             currentBlock.add(record);
-            currentPayloadBytes += BlockCodec.encodedRecordSize(record);
+
+            currentPayloadBytes +=
+                    BlockCodec.encodedRecordSize(record);
 
             bloom.add(record.key());
 
             if (minKey == null) {
                 minKey = record.key();
             }
+
             maxKey = record.key();
             previousKey = record.key();
 
-            minSequence = Math.min(minSequence, record.sequence());
-            maxSequence = Math.max(maxSequence, record.sequence());
+            minSequence = Math.min(
+                    minSequence, record.sequence());
+
+            maxSequence = Math.max(
+                    maxSequence, record.sequence());
+
             entryCount++;
         }
 
         if (entryCount != expectedEntries) {
             throw new IllegalArgumentException(
                     "Expected " + expectedEntries
-                            + " records but received " + entryCount);
+                            + " records but received "
+                            + entryCount);
         }
 
         if (!currentBlock.isEmpty()) {
@@ -166,6 +179,19 @@ public final class SSTableWriter {
                 entryCount,
                 resultBytes.length
         );
+
+        // Mandatory writer self-check:
+        // Parse and fully validate the produced binary SSTable
+        // using the independent production reader.
+        try {
+            SSTableReader.open(resultBytes, meta);
+        } catch (RuntimeException e) {
+            throw new IllegalStateException(
+                    "SSTable writer self-check failed"
+                            + " for table " + tableId,
+                    e
+            );
+        }
 
         return new Result(meta, resultBytes);
     }
@@ -223,7 +249,6 @@ public final class SSTableWriter {
         putFixedKey(buffer, minKey);
         putFixedKey(buffer, maxKey);
 
-        // Reserved bytes for future compatible extensions.
         while (buffer.position() < FOOTER_BYTES - 4) {
             buffer.put((byte) 0);
         }
@@ -237,17 +262,20 @@ public final class SSTableWriter {
     }
 
     private static void putFixedKey(
-            ByteBuffer buffer, String key) {
+            ByteBuffer buffer,
+            String key) {
 
-        byte[] bytes = key.getBytes(StandardCharsets.US_ASCII);
+        byte[] bytes =
+                key.getBytes(StandardCharsets.US_ASCII);
 
-        if (bytes.length < 1 || bytes.length > KEY_FIELD_BYTES) {
-            throw new IllegalArgumentException("Invalid footer key");
+        if (bytes.length < 1
+                || bytes.length > KEY_FIELD_BYTES) {
+            throw new IllegalArgumentException(
+                    "Invalid footer key");
         }
 
         buffer.putInt(bytes.length);
         buffer.put(bytes);
-
         buffer.put(new byte[KEY_FIELD_BYTES - bytes.length]);
     }
 }
