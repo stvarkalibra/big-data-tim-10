@@ -152,6 +152,105 @@ class EngineBackpressureTest {
         assertEquals(0, engine.backpressuredWriters());
     }
 
+    // ---------- fatal transitions wake waiting writers (CP1 §22) ----------
+
+    /** Like backpressuredEngine, plus a published table that is corrupt for key "zz". */
+    private static Engine backpressuredEngineWithCorruptTable() throws StorageException {
+        FakeTable corrupt = new FakeTable(9,
+                rs.raf.dlsm.common.InternalRecord.put("zz", 1, v()));
+        corrupt.corruptGet = true;
+        InMemoryWal wal = new InMemoryWal();
+        Engine engine = new Engine(new EngineConfig(LIMIT), wal, wal.createSegment(ctx()),
+                SequenceAllocator.after(1), new EngineView(null, List.of(corrupt)));
+        engine.put("k1", v(), ctx());
+        engine.put("k2", v(), ctx());
+        engine.put("k3", v(), ctx());
+        engine.put("k4", v(), ctx());
+        assertEquals(EngineMode.BACKPRESSURED, engine.mode());
+        return engine;
+    }
+
+    private Future<ErrorCode> waitingWriter(Engine engine) {
+        return writers.submit(() -> {
+            try {
+                engine.put("k9", v(), OpContext.withTimeout("waiter", 10_000));
+                return null;
+            } catch (StorageException e) {
+                return e.code();
+            }
+        });
+    }
+
+    @Test
+    void corruptionFoundByAReaderWakesWaitingWriters() throws Exception {
+        Engine engine = backpressuredEngineWithCorruptTable();
+        Future<ErrorCode> waiter = waitingWriter(engine);
+        awaitTrue(() -> engine.backpressuredWriters() == 1, "the writer waits");
+
+        // A reader, holding only the read lock, finds the corrupt table.
+        assertThrows(StorageException.class, () -> engine.get("zz", ctx()));
+
+        // The writer fails promptly, long before its 10 s deadline.
+        assertEquals(ErrorCode.NODE_NOT_READY, waiter.get(3, TimeUnit.SECONDS));
+        assertEquals(EngineMode.FAILED, engine.mode());
+        assertEquals("DATA_BLOCK", engine.lastFatalError().orElseThrow().category());
+        assertEquals(0, engine.backpressuredWriters());
+    }
+
+    @Test
+    void reportFatalErrorFromMaintenanceWakesWaitingWriters() throws Exception {
+        Engine engine = backpressuredEngine();
+        Future<ErrorCode> waiter = waitingWriter(engine);
+        awaitTrue(() -> engine.backpressuredWriters() == 1, "the writer waits");
+
+        StorageException cause = new StorageException(ErrorCode.STORAGE_IO,
+                "MANIFEST_INVALID", "Directory sync after manifest rename failed");
+        MaintenanceHost host = engine;
+        host.reportFatalError(cause);   // without any engine lock
+
+        assertEquals(ErrorCode.NODE_NOT_READY, waiter.get(3, TimeUnit.SECONDS));
+        assertSame(cause, engine.lastFatalError().orElseThrow());
+        assertEquals(Lifecycle.FAILED, engine.lifecycle());
+    }
+
+    @Test
+    void reportFatalErrorUnderTheWriteLockWakesWritersToo() throws Exception {
+        Engine engine = backpressuredEngine();
+        Future<ErrorCode> waiter = waitingWriter(engine);
+        awaitTrue(() -> engine.backpressuredWriters() == 1, "the writer waits");
+
+        engine.underEngineWriteLock(ctx(), () -> {
+            engine.reportFatalError(new StorageException(ErrorCode.STORAGE_IO, "lost"));
+            return null;
+        });
+
+        assertEquals(ErrorCode.NODE_NOT_READY, waiter.get(3, TimeUnit.SECONDS));
+    }
+
+    @Test
+    void firstFatalErrorIsKeptAndEverythingIsRefusedAfterwards() throws Exception {
+        Engine engine = backpressuredEngine();
+        StorageException first = new StorageException(ErrorCode.STORAGE_IO, "first");
+        engine.reportFatalError(first);
+        engine.reportFatalError(new StorageException(ErrorCode.INTERNAL_ERROR, "second"));
+
+        assertSame(first, engine.lastFatalError().orElseThrow());
+        for (Callable call : List.<Callable>of(
+                () -> engine.put("x", v(), ctx()),
+                () -> engine.get("k1", ctx()),
+                () -> engine.maxSequenceInEngine(ctx()),
+                () -> engine.rotateIfActiveContainsUpTo(1, ctx()),
+                () -> engine.underEngineWriteLock(ctx(), () -> "never"))) {
+            StorageException e = assertThrows(StorageException.class, call::run);
+            assertEquals(ErrorCode.NODE_NOT_READY, e.code());
+        }
+    }
+
+    @FunctionalInterface
+    private interface Callable {
+        Object run() throws Exception;
+    }
+
     @Test
     void flushAloneEndsBackpressureEvenWithoutWaiters() throws Exception {
         Engine engine = backpressuredEngine();

@@ -568,8 +568,10 @@ public final class Engine implements StorageEngine, MaintenanceHost {
     }
 
     /**
-     * Moves to FAILED (first error wins) and returns the error to throw.
-     * Readers may call this concurrently under the read lock.
+     * Moves to FAILED (first error wins), wakes writers waiting on
+     * backpressure so they fail at once instead of at their deadline
+     * (CP1 §22), and returns the error to throw. Callable with the write
+     * lock, with the read lock, or with no engine lock at all.
      */
     private StorageException fail(StorageException error) {
         synchronized (failureLock) {
@@ -578,7 +580,33 @@ public final class Engine implements StorageEngine, MaintenanceHost {
             }
             mode = EngineMode.FAILED;
         }
+        wakeWaitingWriters();
         return error;
+    }
+
+    private void wakeWaitingWriters() {
+        if (engineLock.isWriteLockedByCurrentThread()) {
+            rotationSlotFree.signalAll();
+            return;
+        }
+        // Signalling needs the write lock. A reader cannot upgrade its read
+        // lock, so a short-lived thread takes the write lock once it is free.
+        // A writer about to wait still holds the write lock, so this signal
+        // can only arrive after it is already waiting: none is missed.
+        Thread.ofVirtual().name("engine-failed-wakeup").start(() -> {
+            Lock writeLock = engineLock.writeLock();
+            writeLock.lock();
+            try {
+                rotationSlotFree.signalAll();
+            } finally {
+                writeLock.unlock();
+            }
+        });
+    }
+
+    @Override
+    public void reportFatalError(StorageException cause) {
+        fail(Objects.requireNonNull(cause, "cause"));
     }
 
     private static void acquire(Lock lock, OpContext ctx) throws StorageException {
