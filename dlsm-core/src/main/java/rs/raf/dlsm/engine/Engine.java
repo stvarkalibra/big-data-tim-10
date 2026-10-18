@@ -61,6 +61,8 @@ public final class Engine implements StorageEngine, MaintenanceHost {
     private final SequenceAllocator sequences;
     private final Object failureLock = new Object();
     private volatile FlushScheduler flushScheduler = FlushScheduler.NONE;
+    /** Run by {@link #close()}, e.g. to stop helper threads. */
+    private final List<Runnable> closeActions = new java.util.concurrent.CopyOnWriteArrayList<>();
 
     /** The active pair (CP1 §10): changed only together, under the write lock. */
     private MemTable active;
@@ -113,8 +115,15 @@ public final class Engine implements StorageEngine, MaintenanceHost {
      */
     public static Engine openInMemory(EngineConfig config) {
         InMemoryWal wal = new InMemoryWal();
-        return new Engine(config, wal, wal.createSegment(OpContext.background()),
+        Engine engine = new Engine(config, wal, wal.createSegment(OpContext.background()),
                 SequenceAllocator.forNewDatabase(), EngineView.EMPTY);
+
+        // Frozen generations are "flushed" into in-memory tables, so the
+        // frozen slot frees up and backpressure ends as with a real flush.
+        InMemoryFlusher flusher = new InMemoryFlusher(engine);
+        engine.setFlushScheduler(flusher);
+        engine.closeActions.add(flusher::close);
+        return engine;
     }
 
     /**
@@ -553,7 +562,10 @@ public final class Engine implements StorageEngine, MaintenanceHost {
 
     @Override
     public void close() {
-        // The in-memory engine owns no files yet.
+        // The in-memory engine owns no files yet, only helper threads.
+        for (Runnable action : closeActions) {
+            action.run();
+        }
     }
 
     /**

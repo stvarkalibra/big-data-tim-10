@@ -168,4 +168,23 @@ class StandaloneNodeApiTest {
         // Nothing was stored by the rejected PUT.
         assertNull(get("alpha"));
     }
+
+    @Test
+    void smallMemtableNodeKeepsServingThroughManyRotations() throws Exception {
+        // Restart with a tiny MEMTABLE_MAX_BYTES, as the harness does for
+        // flush tests: every few writes rotate, flush and briefly backpressure.
+        node.close();
+        JsonLog log = new JsonLog("standalone",
+                new PrintStream(new ByteArrayOutputStream(), true, StandardCharsets.UTF_8),
+                Clock.systemUTC());
+        node = StandaloneNode.start(new ServerConfig("standalone", 0, 0, 256), log);
+
+        for (int i = 0; i < 100; i++) {
+            put("key" + i, "value" + i);
+        }
+        for (int i = 0; i < 100; i += 7) {
+            assertArrayEquals(("value" + i).getBytes(StandardCharsets.UTF_8), get("key" + i));
+        }
+        assertEquals(100, scan("a", "z", 1000).size());
+    }
 }

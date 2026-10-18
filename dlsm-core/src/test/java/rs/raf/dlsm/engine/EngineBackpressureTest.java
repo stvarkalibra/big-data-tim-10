@@ -51,7 +51,7 @@ class EngineBackpressureTest {
 
     /** Fills generation 1, rotates it, then fills generation 2: frozen slot taken. */
     private static Engine backpressuredEngine() throws StorageException {
-        Engine engine = Engine.openInMemory(new EngineConfig(LIMIT));
+        Engine engine = TestEngines.withoutFlusher(new EngineConfig(LIMIT));
         engine.put("k1", v(), ctx());
         engine.put("k2", v(), ctx());   // generation 1 full
         engine.put("k3", v(), ctx());   // rotates generation 1 into the frozen slot
