@@ -3,6 +3,7 @@ package rs.raf.dlsm.stats;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.atomic.AtomicLong;
 
 public final class StorageStats {
@@ -33,24 +34,75 @@ public final class StorageStats {
     public final AtomicLong bloomPositiveProbes = new AtomicLong();
     public final AtomicLong rangeScanBlocksRead = new AtomicLong();
 
-    // Statistika resetovanja
     public final AtomicLong resetEpoch = new AtomicLong();
 
-    public synchronized long reset() {
-        for (AtomicLong counter : counters().values()) {
-            counter.set(0);
-        }
-        return resetEpoch.incrementAndGet();
+    private final Object lock = new Object();
+
+    /**
+     * Preferred API for recording counter changes.
+     * Operations through add/increment/reset/snapshot share one lock.
+     */
+    public void increment(String counterName) {
+        add(counterName, 1);
     }
 
-    public synchronized Map<String, Long> snapshot() {
-        Map<String, Long> result = new LinkedHashMap<>();
-
-        for (var entry : counters().entrySet()) {
-            result.put(entry.getKey(), entry.getValue().get());
+    public void add(String counterName, long amount) {
+        if (amount < 0) {
+            throw new IllegalArgumentException(
+                    "Counter increment cannot be negative");
         }
 
-        result.put("resetEpoch", resetEpoch.get());
+        synchronized (lock) {
+            AtomicLong counter = counter(counterName);
+            long current = counter.get();
+
+            if (current > Long.MAX_VALUE - amount) {
+                throw new ArithmeticException("Counter overflow");
+            }
+
+            counter.set(current + amount);
+        }
+    }
+
+    public long reset() {
+        synchronized (lock) {
+            long epoch = resetEpoch.get();
+
+            if (epoch == Long.MAX_VALUE) {
+                throw new ArithmeticException("Reset epoch overflow");
+            }
+
+            for (AtomicLong counter : counters().values()) {
+                counter.set(0);
+            }
+
+            return resetEpoch.incrementAndGet();
+        }
+    }
+
+    public Map<String, Long> snapshot() {
+        synchronized (lock) {
+            Map<String, Long> result = new LinkedHashMap<>();
+
+            for (var entry : counters().entrySet()) {
+                result.put(entry.getKey(), entry.getValue().get());
+            }
+
+            result.put("resetEpoch", resetEpoch.get());
+            return result;
+        }
+    }
+
+    private AtomicLong counter(String name) {
+        Objects.requireNonNull(name, "counterName");
+
+        AtomicLong result = counters().get(name);
+
+        if (result == null) {
+            throw new IllegalArgumentException(
+                    "Unknown counter: " + name);
+        }
+
         return result;
     }
 
