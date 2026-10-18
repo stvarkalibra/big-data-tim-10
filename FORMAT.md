@@ -262,6 +262,54 @@ dužina=35    komplement   ver=1  PUT rez redni broj = 3           k=5    v=0   
 | bajt `55` (vrednost `A`) promenjen iz `41` u `42` | `CORRUPT`, `CHECKSUM` na `24` | struktura je ispravna, CRC nije (korak 8) |
 | bajt `20` (CRC zaglavlja) promenjen | `CORRUPT`, `WAL_HEADER` na `0` | CRC zaglavlja segmenta ne odgovara (§3.2) |
 
+## 4. `node.json` i `LOCK`
+
+### 4.1 `node.json`
+
+`node.json` čuva stabilan identitet čvora i verziju formata direktorijuma, a ne sadržaj LSM-a (CP1 §14.1). Nalazi se u korenu trajnog direktorijuma (`/var/lib/dlsm/node.json`).
+
+Tačan sadržaj koji mehanizam upisuje (UTF-8 JSON objekat, bez BOM-a):
+
+```json
+{"formatVersion":1,"nodeId":"standalone"}
+```
+
+| Polje | JSON tip | Pravilo |
+|---|---|---|
+| `formatVersion` | ceo broj | Tačno `1`. Svaka druga vrednost je nepodržana verzija. |
+| `nodeId` | string | `1..64` znaka iz `[A-Za-z0-9._-]` (ista pravila kao `NODE_ID` u `ServerConfig`) i **jednak** konfigurisanom `NODE_ID`. |
+
+Čitalac odbija fajl koji nije ispravan JSON objekat, kome nedostaje neko od dva polja, čije polje ima pogrešan tip ili koji sadrži nepoznato polje. Razmaci i redosled polja nisu bitni za čitanje.
+
+**Upis** (samo pri prvoj inicijalizaciji, CP1 §14.2 korak 2), istom disciplinom kao ostali mali trajni metapodaci:
+
+1. upisati kompletan sadržaj u `lsm/tmp/node.json.tmp`;
+2. izvršiti force nad privremenim fajlom;
+3. atomski ga premestiti na `node.json` u korenu direktorijuma (isti sistem fajlova);
+4. izvršiti force nad korenskim direktorijumom.
+
+Posle prve inicijalizacije `node.json` se **nikad** ne prepisuje niti ponovo stvara (CP1 §14.1).
+
+### 4.2 `LOCK`
+
+`LOCK` je prazan fajl na stabilnoj putanji `/var/lib/dlsm/LOCK`. Njegov sadržaj se ne upisuje i ne čita. Vlasništvo nad direktorijumom daje isključiva brava operativnog sistema (`FileChannel.tryLock()`), koja se drži dok proces živi; samo postojanje fajla ne znači da drugi proces radi, i fajl se ne briše pri gašenju (CP1 §14.1).
+
+### 4.3 Odluke pri pokretanju koje zavise od ovih fajlova
+
+Klasifikacija iz CP1 §14.2. „Stabilni podaci“ su `MANIFEST.json`, bilo koji WAL segment u `wal/` ili bilo koja SSTable u `sst/`.
+
+| Zatečeno stanje | Ishod | Kategorija |
+|---|---|---|
+| Brava `LOCK` ne može da se dobije | `FAILED` | `DIRECTORY_LOCKED` |
+| Nema `node.json` i nema stabilnih podataka (direktorijumi smeju da postoje) | prva inicijalizacija od koraka 1 | — |
+| Ispravan i odgovarajući `node.json`, nema manifesta, nema WAL-a ni SSTable | nastavak inicijalizacije od koraka 3 | — |
+| Ispravan `node.json` i prazan manifest generacije 0, nema upotrebljivog WAL-a | dodela i force novog WAL segmenta | — |
+| Nema `node.json`, a postoje stabilni podaci | `FAILED` | `NODE_IDENTITY_MISMATCH` |
+| `node.json` je neispravan (JSON, polja, tipovi, nepodržana verzija) | `FAILED` | `NODE_IDENTITY_MISMATCH` |
+| `nodeId` se razlikuje od konfigurisanog `NODE_ID` | `FAILED` | `NODE_IDENTITY_MISMATCH` |
+
+Zaostali `lsm/tmp/node.json.tmp` nikad ne nadjačava konačni `node.json` i briše se tek posle ove klasifikacije (CP1 §14.2).
+
 ## SSTable — Bloom Filter Format (Version 1)
 
 ### Parameters
