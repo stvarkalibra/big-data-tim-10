@@ -3,9 +3,11 @@ package rs.raf.dlsm.engine;
 import rs.raf.dlsm.common.Lifecycle;
 import rs.raf.dlsm.common.StorageException;
 import rs.raf.dlsm.sstable.SSTableMeta;
+import rs.raf.dlsm.stats.StatusBuilder;
 
 import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 
 /**
@@ -45,6 +47,52 @@ public record EngineStatus(
     }
 
     /**
+     * Combines this engine part with the other modules' parts into the
+     * status builder's snapshot for {@code GET /admin/v1/storage/status};
+     * {@code StandaloneStatusBuilder.build(snapshot, lastAcceptedSequence(),
+     * lastDurableSequence())} then gives {@code GET /admin/v1/status}.
+     *
+     * <p>For a consistent response, read the other parts and call
+     * {@code Engine.status} inside one {@code Engine.underEngineReadLock}.
+     *
+     * @param walSegments segment details from the WAL module
+     * @param manifest    the current manifest from the maintenance module
+     * @param maintenance the current maintenance job, or idle
+     * @param stats       {@code StorageStats.snapshot()}
+     */
+    public StatusBuilder.Snapshot toSnapshot(
+            String nodeId,
+            List<StatusBuilder.WalSegment> walSegments,
+            StatusBuilder.Manifest manifest,
+            StatusBuilder.Maintenance maintenance,
+            Map<String, Long> stats) {
+
+        List<StatusBuilder.Table> tables = sstables.stream()
+                .map(t -> new StatusBuilder.Table(t.tableId(), t.file(), t.minKey(),
+                        t.maxKey(), t.minSequence(), t.maxSequence(),
+                        t.entryCount(), t.sizeBytes()))
+                .toList();
+
+        return new StatusBuilder.Snapshot(
+                nodeId,
+                lifecycle.name(),
+                engineMode.name(),
+                writeBackpressure,
+                backpressuredWriters,
+                lastFatalError == null ? null
+                        : new StatusBuilder.FatalError(lastFatalError.code(),
+                                lastFatalError.message()),
+                nextSequence,
+                activeMemtable.toStatus(),
+                immutableMemtable == null ? null : immutableMemtable.toStatus(),
+                walSegments,
+                manifest,
+                tables,
+                maintenance,
+                stats);
+    }
+
+    /**
      * One MemTable generation. {@code walSegmentId} and
      * {@code rotationRequired} are set only for the active generation,
      * {@code walSegmentIds} only for the frozen one. Sequences are null for
@@ -62,6 +110,11 @@ public record EngineStatus(
 
         public Memtable {
             walSegmentIds = walSegmentIds == null ? null : List.copyOf(walSegmentIds);
+        }
+
+        StatusBuilder.Memtable toStatus() {
+            return new StatusBuilder.Memtable(generation, walSegmentId, walSegmentIds,
+                    entryCount, logicalBytes, minSequence, maxSequence, rotationRequired);
         }
     }
 
