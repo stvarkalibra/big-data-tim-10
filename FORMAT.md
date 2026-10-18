@@ -47,6 +47,51 @@ Raspored trajnog volumena (CP1 §14):
 - WAL i SSTable ID-jevi su odvojeni prostori imena; praznine u ID-jevima su dozvoljene, ponovna upotreba nije.
 - Privremeni i konačni fajlovi su na istom sistemu fajlova, pa je premeštanje iz `tmp/` atomsko.
 
+## 3. WAL (write-ahead log)
+
+Tim usvaja **tačno preporučeni raspored iz CP1 §16.3.1**, bez izmena. WAL segment je fajl koji se sastoji od jednog zaglavlja segmenta (§3.2) i zatim niza okvira zapisa (§3.3), bez razmaka i bez dopune između njih. Segment nema footer: kraj segmenta je fizički kraj fajla.
+
+```text
+offset 0                 24
+       +-----------------+---------+---------+-----+---------+
+       | zaglavlje (24 B)| okvir 1 | okvir 2 | ... | okvir n |  EOF
+       +-----------------+---------+---------+-----+---------+
+```
+
+### 3.1 Imena, ID-jevi i stvaranje segmenta
+
+| Stavka | Vrednost |
+|---|---|
+| Konačno ime | `lsm/wal/wal-<id>.log`, `<id>` sa 20 cifara (§2) |
+| Privremeno ime pri stvaranju | `lsm/tmp/wal-<id>.log.tmp`, isti `<id>` kao konačno ime |
+| Prvi ID na novoj bazi | `1` (CP1 §14.2) |
+| Sledeći ID pri pokretanju | `max(1, 1 + najveći sintaksno ispravan WAL ID u wal/ ili tmp/)`, računa se **pre** čišćenja (CP1 §16.1) |
+
+Privremeno ime nosi ID da bi alokator video i ID-jeve zaostalih privremenih fajlova i nikad ih ponovo ne dodelio.
+
+Stvaranje segmenta je mali protokol objavljivanja (CP1 §16.1). Segment ne prihvata nijedan zapis pre koraka 4:
+
+1. upisati kompletno zaglavlje od 24 bajta u `lsm/tmp/wal-<id>.log.tmp`;
+2. izvršiti force nad privremenim fajlom;
+3. atomski ga premestiti na `lsm/wal/wal-<id>.log`; ako odredište već postoji, to je greška i ništa se ne prepisuje;
+4. izvršiti force nad direktorijumom `lsm/wal/`.
+
+Pad pre koraka 3 ostavlja samo privremeni fajl, koji oporavak briše. Pad posle koraka 3 ostavlja ispravan prazan segment (samo zaglavlje, bez okvira), koji oporavak klasifikuje i bezbedno povlači (CP1 §21.1, korak 13).
+
+### 3.2 Zaglavlje segmenta (24 bajta)
+
+| Offset | Veličina | Polje | Tip | Validacija |
+|---:|---:|---|---|---|
+| `0` | `8` | magic | ASCII | Tačno `LSMWAL01` (`4C 53 4D 57 41 4C 30 31`). |
+| `8` | `2` | verzija formata fajla | `u16` | Tačno `1`; svaka druga vrednost se odbija. |
+| `10` | `2` | rezervisano | `u16` | Tačno `0` u verziji 1. |
+| `12` | `8` | ID segmenta | `i64` | Pozitivan i jednak ID-ju iz imena fajla. |
+| `20` | `4` | CRC32C zaglavlja | `u32` | CRC32C nad bajtovima `0..19`. |
+
+Redosled provere pri čitanju: dužina fajla (najmanje 24 bajta) → CRC zaglavlja → magic → verzija → rezervisano polje → ID segmenta prema imenu fajla. Svaki neuspeh je oštećenje kategorije `WAL_HEADER` i prekida pokretanje (CP1 §16.4).
+
+To važi i za konačni segment kraći od 24 bajta. Protokol iz §3.1 dobija konačno ime tek posle force-a kompletnog zaglavlja, pa skraćeno zaglavlje ne može nastati padom i ne tretira se kao nepotpun završetak.
+
 ## SSTable — Bloom Filter Format (Version 1)
 
 ### Parameters
