@@ -14,6 +14,8 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.Callable;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
@@ -41,7 +43,7 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
  * <p>Not yet here: backpressure, recovery, failpoints and statistics.
  * Their places are marked in the code.
  */
-public final class Engine implements StorageEngine {
+public final class Engine implements StorageEngine, MaintenanceHost {
 
     /** For engines built without rotation support (tests of other parts). */
     private static final WalFactory NO_ROTATION = ctx -> {
@@ -225,10 +227,9 @@ public final class Engine implements StorageEngine {
         flushScheduler.flushNeeded();
     }
 
-    /**
-     * {@link MaintenanceHost#maxSequenceInEngine}: the manual flush target
-     * (CP1 §23.1), tombstones included; 0 when the engine holds nothing.
-     */
+    // ---------- MaintenanceHost ----------
+
+    @Override
     public long maxSequenceInEngine(OpContext ctx) throws StorageException {
         Lock readLock = engineLock.readLock();
         acquire(readLock, ctx);
@@ -240,12 +241,110 @@ public final class Engine implements StorageEngine {
         }
     }
 
-    /** {@link MaintenanceHost#currentView}: frozen generation and published tables. */
+    @Override
     public EngineView currentView() {
         return view;
     }
 
-    /** {@link MaintenanceHost#rotateIfActiveContainsUpTo}. */
+    @Override
+    public Optional<FlushInput> oldestImmutable() {
+        // At most one frozen generation exists, so it is also the oldest.
+        return Optional.ofNullable(view.immutable()).map(FlushInput::new);
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * <p>A {@code FAILED} engine publishes nothing: the step is not run and
+     * {@code NODE_NOT_READY} is thrown.
+     */
+    @Override
+    public <T> T underEngineWriteLock(OpContext ctx, Callable<T> step) throws Exception {
+        Objects.requireNonNull(step, "step");
+        Lock writeLock = engineLock.writeLock();
+        acquire(writeLock, ctx);
+        try {
+            requireMode("Engine is not serving");
+            return step.call();
+        } finally {
+            writeLock.unlock();
+        }
+    }
+
+    @Override
+    public void installFlushResult(long memtableGeneration, TableSource table) {
+        Objects.requireNonNull(table, "table");
+        requireWriteLockHeld();
+
+        EngineView current = view;
+        ImmutableMemTable frozen = current.immutable();
+        if (frozen == null || frozen.generation() != memtableGeneration) {
+            throw new IllegalStateException("Generation " + memtableGeneration
+                    + " is not the frozen generation waiting for flush");
+        }
+        if (current.table(table.tableId()).isPresent()) {
+            throw new IllegalStateException("Table " + table.tableId() + " is already published");
+        }
+        // The table must hold exactly the frozen records: every key once,
+        // and the newest version, which carries the generation's maxSequence.
+        if (table.meta().entryCount() != frozen.entryCount()
+                || table.meta().maxSequence() != frozen.maxSequence()) {
+            throw new IllegalStateException("Table " + table.tableId()
+                    + " does not match generation " + memtableGeneration);
+        }
+
+        // CP1 §19.1 step 11: one atomic swap; readers see the frozen records
+        // either in memory or in the table, never in neither.
+        List<TableSource> tables = new ArrayList<>(current.tables());
+        tables.add(table);
+        view = new EngineView(null, tables);
+        // TODO(backpressure): wake writers waiting for the frozen slot.
+    }
+
+    @Override
+    public void installCompactionResult(Set<Long> inputTableIds, TableSource output) {
+        Objects.requireNonNull(inputTableIds, "inputTableIds");
+        Objects.requireNonNull(output, "output");
+        requireWriteLockHeld();
+
+        EngineView current = view;
+        if (inputTableIds.isEmpty()) {
+            throw new IllegalStateException("Compaction needs at least one input");
+        }
+        long inputMaxSequence = 0;
+        for (long id : inputTableIds) {
+            TableSource input = current.table(id).orElseThrow(() -> new IllegalStateException(
+                    "Compaction input " + id + " is no longer published"));
+            inputMaxSequence = Math.max(inputMaxSequence, input.meta().maxSequence());
+        }
+        if (current.table(output.tableId()).isPresent()) {
+            throw new IllegalStateException("Table " + output.tableId() + " is already published");
+        }
+        // Compaction keeps the newest version of every key, so the newest
+        // input sequence must survive in the output.
+        if (output.meta().maxSequence() != inputMaxSequence) {
+            throw new IllegalStateException("Compaction output " + output.tableId()
+                    + " does not match its inputs");
+        }
+
+        // CP1 §20.3 step 8: replace exactly the inputs, keep everything else.
+        List<TableSource> tables = new ArrayList<>();
+        for (TableSource table : current.tables()) {
+            if (!inputTableIds.contains(table.tableId())) {
+                tables.add(table);
+            }
+        }
+        tables.add(output);
+        view = new EngineView(current.immutable(), tables);
+    }
+
+    private void requireWriteLockHeld() {
+        if (!engineLock.isWriteLockedByCurrentThread()) {
+            throw new IllegalStateException("Call this inside underEngineWriteLock");
+        }
+    }
+
+    @Override
     public boolean rotateIfActiveContainsUpTo(long targetSequence, OpContext ctx)
             throws StorageException {
         Lock writeLock = engineLock.writeLock();
