@@ -104,7 +104,7 @@ class InspectSSTableFileTest {
                 );
 
         assertEquals(expected, actual);
-        assertEquals(1000, actual.get("entryCount"));
+        assertEquals(1000L, actual.get("entryCount"));
 
         @SuppressWarnings("unchecked")
         List<Map<String, Object>> blocks =
