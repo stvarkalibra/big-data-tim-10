@@ -21,6 +21,24 @@ import java.util.zip.CRC32C;
  * Records are consumed once and data blocks are emitted
  * progressively. Only the current block, sparse index
  * and Bloom filter are retained in memory.
+ *
+ * FAILURE CONTRACT:
+ * Encoding is successful only if encode() returns SSTableMeta.
+ *
+ * If encode() throws any exception, including IOException,
+ * IllegalArgumentException or an exception from the supplied
+ * iterator, the destination may contain a partial SSTable.
+ *
+ * Such output MUST be discarded. The caller MUST NOT validate
+ * it as a finished table, rename it to the final table name
+ * or publish it in the manifest.
+ *
+ * Encoding is not transactional and does not roll back bytes
+ * already written to the caller-owned OutputStream.
+ *
+ * This class deliberately does not delete partial files:
+ * file creation, cleanup, durability and publication belong
+ * to the storage/finalization layer.
  */
 public final class SSTableStreamEncoder {
 
@@ -32,6 +50,29 @@ public final class SSTableStreamEncoder {
     private SSTableStreamEncoder() {
     }
 
+    /**
+     * Writes one complete binary SSTable to the supplied stream.
+     *
+     * Preconditions:
+     * - tableId and expectedEntries are positive;
+     * - the iterator yields exactly expectedEntries records;
+     * - keys are strictly increasing without duplicates;
+     * - records obey BlockCodec validation rules.
+     *
+     * On success, returns metadata for exactly the bytes
+     * emitted by this invocation.
+     *
+     * On failure, no metadata is returned. The caller must
+     * discard ALL output from this invocation, even if the
+     * stream contains a complete header or some data blocks.
+     *
+     * The method never closes or flushes the supplied stream.
+     *
+     * @throws IOException if the supplied stream fails
+     * @throws IllegalArgumentException for invalid input
+     * @throws RuntimeException if the record iterator or
+     *                          an internal encoder operation fails
+     */
     public static SSTableMeta encode(
             OutputStream output,
             long tableId,
@@ -46,7 +87,6 @@ public final class SSTableStreamEncoder {
                     "Invalid table ID or expected record count");
         }
 
-        // Validate the Bloom allocation before writing any bytes.
         BloomFilter bloom = new BloomFilter(expectedEntries);
         SparseIndex index = new SparseIndex();
 
@@ -64,6 +104,7 @@ public final class SSTableStreamEncoder {
         position += SSTableWriter.HEADER_BYTES;
 
         final long dataOffset = position;
+
         List<BlockCodec.Record> currentBlock =
                 new ArrayList<>();
 
@@ -100,13 +141,18 @@ public final class SSTableStreamEncoder {
                     currentPayload, record)) {
 
                 position += emitBlock(
-                        output, index, currentBlock, position);
+                        output,
+                        index,
+                        currentBlock,
+                        position
+                );
 
                 currentBlock.clear();
                 currentPayload = 0;
             }
 
             currentBlock.add(record);
+
             currentPayload = Math.addExact(
                     currentPayload,
                     BlockCodec.encodedRecordSize(record)
@@ -138,7 +184,11 @@ public final class SSTableStreamEncoder {
 
         if (!currentBlock.isEmpty()) {
             position += emitBlock(
-                    output, index, currentBlock, position);
+                    output,
+                    index,
+                    currentBlock,
+                    position
+            );
         }
 
         final long dataLength = position - dataOffset;
@@ -173,8 +223,11 @@ public final class SSTableStreamEncoder {
         output.write(footer);
         position += footer.length;
 
-        // Do not close or flush the supplied stream here.
-        // The storage layer owns synchronization and publication.
+        // A successful return is the only indication that
+        // binary encoding has completed.
+        //
+        // File validation, force and atomic publication are
+        // separate responsibilities of the caller.
         return new SSTableMeta(
                 tableId,
                 SSTableMeta.fileName(tableId),
@@ -249,6 +302,7 @@ public final class SSTableStreamEncoder {
         }
 
         CRC32C crc = new CRC32C();
+
         crc.update(
                 buffer.array(),
                 0,

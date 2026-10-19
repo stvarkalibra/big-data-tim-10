@@ -85,7 +85,14 @@ public final class SSTableValidator {
                         "SSTable is truncated");
             }
 
-            if (fileSize != expected.sizeBytes()) {
+            // Distinguish a physically truncated file from
+            // a manifest/file-size disagreement.
+            if (fileSize < expected.sizeBytes()) {
+                fail(Category.TRUNCATED_REGION,
+                        "SSTable is shorter than expected");
+            }
+
+            if (fileSize > expected.sizeBytes()) {
                 fail(Category.MANIFEST_TABLE_MISMATCH,
                         "SSTable size differs from manifest");
             }

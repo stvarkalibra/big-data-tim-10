@@ -15,6 +15,7 @@ import java.nio.ByteOrder;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.LinkedHashMap;
@@ -59,7 +60,10 @@ public final class InspectSSTableCommand {
                 .resolve("sst")
                 .resolve(SSTableMeta.fileName(tableId));
 
-        if (!Files.isRegularFile(file)) {
+        if (!Files.isRegularFile(
+                file,
+                LinkOption.NOFOLLOW_LINKS)) {
+
             print(out, error(
                     "MISSING",
                     "Requested SSTable does not exist"
@@ -68,16 +72,12 @@ public final class InspectSSTableCommand {
         }
 
         try {
-            SSTableMeta metadata = readMetadata(file, tableId);
+            SSTableMeta metadata =
+                    readMetadata(file, tableId);
 
-            // Production full validation is Path-based and streaming.
-            SSTableValidator.validateFully(file, metadata);
-
-            // The existing inspector returns detailed record metadata.
-            // It currently uses an in-memory representation.
             Map<String, Object> report =
-                    InspectSSTable.inspect(
-                            Files.readAllBytes(file),
+                    InspectSSTableFile.inspect(
+                            file,
                             metadata
                     );
 
@@ -119,6 +119,7 @@ public final class InspectSSTableCommand {
 
             if (size < SSTableWriter.HEADER_BYTES
                     + FOOTER_BYTES) {
+
                 throw new SSTableValidator.ValidationException(
                         SSTableValidator.Category.TRUNCATED_REGION,
                         "SSTable is truncated",
@@ -134,9 +135,17 @@ public final class InspectSSTableCommand {
             while (target.hasRemaining()) {
                 int read = channel.read(target, offset);
 
-                if (read <= 0) {
+                if (read < 0) {
+                    throw new SSTableValidator.ValidationException(
+                            SSTableValidator.Category.TRUNCATED_REGION,
+                            "Incomplete SSTable footer",
+                            null
+                    );
+                }
+
+                if (read == 0) {
                     throw new IOException(
-                            "Incomplete footer read"
+                            "Footer read made no progress"
                     );
                 }
 
@@ -154,6 +163,7 @@ public final class InspectSSTableCommand {
             if (magic != FOOTER_MAGIC
                     || version != FORMAT_VERSION
                     || tableId != requestedId) {
+
                 throw new SSTableValidator.ValidationException(
                         SSTableValidator.Category.FOOTER,
                         "Invalid SSTable footer identity",
@@ -161,7 +171,7 @@ public final class InspectSSTableCommand {
                 );
             }
 
-            // Region offsets and lengths.
+            // Skip the six region offsets and lengths.
             for (int i = 0; i < 6; i++) {
                 footer.getLong();
             }
@@ -240,10 +250,8 @@ public final class InspectSSTableCommand {
             String category,
             String message) {
 
-        Map<String, Object> report = error(
-                "CORRUPT",
-                message
-        );
+        Map<String, Object> report =
+                error("CORRUPT", message);
 
         report.put("corruptionCategory", category);
 
@@ -255,10 +263,13 @@ public final class InspectSSTableCommand {
             Map<String, Object> report) {
 
         try {
-            out.println(JSON.writeValueAsString(report));
+            out.println(
+                    JSON.writeValueAsString(report)
+            );
         } catch (JsonProcessingException e) {
             throw new IllegalStateException(
-                    "Cannot serialize SSTable inspection", e
+                    "Cannot serialize SSTable inspection",
+                    e
             );
         }
     }
