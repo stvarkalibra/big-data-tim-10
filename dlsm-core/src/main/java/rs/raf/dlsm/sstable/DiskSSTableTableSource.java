@@ -186,6 +186,15 @@ public final class DiskSSTableTableSource implements TableSource {
         return Optional.empty();
     }
 
+    /**
+     * Returns records starting from startInclusive.
+     *
+     * The first candidate block is located using a binary
+     * search over sparse-index first keys: O(log B),
+     * where B is the number of data blocks.
+     *
+     * No data block before the selected candidate is read.
+     */
     @Override
     public Iterator<InternalRecord> iterator(
             String startInclusive) throws StorageException {
@@ -206,20 +215,14 @@ public final class DiskSSTableTableSource implements TableSource {
             return List.<InternalRecord>of().iterator();
         }
 
-        int firstBlock = 0;
-
-        SparseIndex.Entry candidate =
-                index.findBlock(startInclusive);
-
-        if (candidate != null) {
-            firstBlock = entries.indexOf(candidate);
-        }
-
-        final int initialBlock = firstBlock;
+        // The greatest index firstKey <= startInclusive,
+        // or block zero if startInclusive precedes all blocks.
+        int firstBlock = findStartBlock(
+                entries, startInclusive);
 
         return new Iterator<>() {
 
-            private int blockPosition = initialBlock;
+            private int blockPosition = firstBlock;
             private int recordPosition;
             private List<BlockCodec.Record> current = List.of();
             private InternalRecord next;
@@ -280,6 +283,41 @@ public final class DiskSSTableTableSource implements TableSource {
                 return result;
             }
         };
+    }
+
+    /**
+     * Finds the position of the rightmost sparse-index entry
+     * whose firstKey is <= key.
+     *
+     * If key precedes the first entry, returns zero.
+     *
+     * Assumes the validated SSTable index is strictly sorted.
+     */
+    private static int findStartBlock(
+            List<SparseIndex.Entry> entries,
+            String key) {
+
+        int low = 0;
+        int high = entries.size() - 1;
+        int result = 0;
+
+        while (low <= high) {
+            int middle = low + (high - low) / 2;
+
+            int comparison =
+                    entries.get(middle)
+                            .firstKey()
+                            .compareTo(key);
+
+            if (comparison <= 0) {
+                result = middle;
+                low = middle + 1;
+            } else {
+                high = middle - 1;
+            }
+        }
+
+        return result;
     }
 
     private List<BlockCodec.Record> loadBlock(
