@@ -371,19 +371,19 @@ Svaka sekcija ima isti oblik: cilj, šta pročitati, isporuke, failpoint-i, broj
 
 **Isporuke**
 
-- [ ] `InternalRecord`, `Kind`, `Keys` (validacija i poređenje), `ErrorCode`, `StorageException` — **dan 1–2**, jer ih svi koriste.
-- [ ] `SequenceAllocator`: počinje od 1, opseg `1..2^63-1`, pri prekoračenju mehanizam prelazi u `FAILED` (CP1 §6).
-- [ ] `MemTable`: `TreeMap`, čuva samo najveći `sequence` po ključu, `logicalBytes = 32 + len(key) + len(value)` (0 za tombstone i praznu vrednost), `generation`, `min/maxSequence`, `rotationRequired`. `ImmutableMemTable` kao pogled samo za čitanje (CP1 §10).
-- [ ] `EngineMode` mašina stanja `RECOVERING → SERVING ⇄ BACKPRESSURED → FAILED` i `lastFatalError`. Iz `FAILED` nema povratka bez restarta (CP1 §22).
-- [ ] Brave po CP1 §13.1: fer `ReentrantReadWriteLock engineLock`. Za backpressure se koristi `engineLock.writeLock().newCondition()`, jer `await` oslobađa bravu. Redosled brava se dokumentuje u `DESIGN.md`.
-- [ ] Put mutacije u **10 koraka** (CP1 §9) za `PUT` i `DELETE`: validacija pre bilo kakvog sporednog efekta → write lock → provera režima i backpressure-a sa rokom → dodela `sequence` → kodiranje → `WalSegment.append` → `WalSegment.force` → MemTable → vidljivost → odgovor. I/O greška u append ili force vodi u `FAILED`.
-- [ ] Rotacija u **4 koraka** (CP1 §10): novi WAL kroz `WalSegments.create` → zamrzavanje stare generacije → atomska zamena para (MemTable, WAL) → `FlushScheduler.flushNeeded()`. Najviše jedna immutable generacija; inače backpressure.
-- [ ] `GET` (CP1 §11): aktivna → immutable → SSTable čiji opseg pokriva ključ. Bira se najveći `sequence`; tombstone daje `NOT_FOUND`. Čitanje drži read lock tokom cele pretrage.
-- [ ] `MergingIterator` i `SCAN` (CP1 §12): min-heap, grupisanje **svih** verzija istog ključa, pobednik po najvećem `sequence`, tombstone se ne emituje i ne broji u `limit`, `endExclusive` se nikad ne emituje. Read lock se drži tokom celog skeniranja (osnova).
-- [ ] `MaintenanceHost` za Ilijin flush i compaction (§5.1): nepromenljiv `EngineView`, zamena pogleda i buđenje pisaca pod write lock-om.
-- [ ] HTTP serveri na `8080` i `8082` (bootstrap, router, `ErrorEnvelope`, JSON pomoćnik) — **do M0**, da ostali mogu da kače svoje handler-e.
-- [ ] Javni API (PI §17–§18): `X-Request-Id` (1–64, `[A-Za-z0-9._:-]`, vraća se u odgovoru), `X-Request-Timeout-Ms` (100..10000, podrazumevano 5000, pretvara se u `deadlineNanos`), strogi standardni Base64 sa dopunom (dužina mora biti deljiva sa 4, jer Java dekoder inače prihvata i nedopunjen ulaz), najviše 262 144 dekodirana bajta (`VALUE_TOO_LARGE`), `Cache-Control: no-store`, bez stack trace-ova i apsolutnih putanja u odgovorima, `partitionId=0`, `epoch=0`, scan sa `observedPartitions:[{"partitionId":0,"epoch":0}]`.
-- [ ] `GET /health/live` i `GET /health/ready` na `8082` (`503` sa stanjem životnog ciklusa dok nije spreman).
+- [x] `InternalRecord`, `Kind`, `Keys` (validacija i poređenje), `ErrorCode`, `StorageException` — **dan 1–2**, jer ih svi koriste.
+- [x] `SequenceAllocator`: počinje od 1, opseg `1..2^63-1`, pri prekoračenju mehanizam prelazi u `FAILED` (CP1 §6).
+- [x] `MemTable`: `TreeMap`, čuva samo najveći `sequence` po ključu, `logicalBytes = 32 + len(key) + len(value)` (0 za tombstone i praznu vrednost), `generation`, `min/maxSequence`, `rotationRequired`. `ImmutableMemTable` kao pogled samo za čitanje (CP1 §10).
+- [x] `EngineMode` mašina stanja `RECOVERING → SERVING ⇄ BACKPRESSURED → FAILED` i `lastFatalError`. Iz `FAILED` nema povratka bez restarta (CP1 §22).
+- [x] Brave po CP1 §13.1: fer `ReentrantReadWriteLock engineLock`. Za backpressure se koristi `engineLock.writeLock().newCondition()`, jer `await` oslobađa bravu. Redosled brava se dokumentuje u `DESIGN.md`.
+- [ ] Put mutacije u **10 koraka** (CP1 §9) za `PUT` i `DELETE`: validacija pre bilo kakvog sporednog efekta → write lock → provera režima i backpressure-a sa rokom → dodela `sequence` → kodiranje → `WalSegment.append` → `WalSegment.force` → MemTable → vidljivost → odgovor. I/O greška u append ili force vodi u `FAILED`. *(Urađeno preko šava `MutationLog`; ostaje pravi `WalSegment` od Mateja.)*
+- [x] Rotacija u **4 koraka** (CP1 §10): novi WAL kroz `WalSegments.create` → zamrzavanje stare generacije → atomska zamena para (MemTable, WAL) → `FlushScheduler.flushNeeded()`. Najviše jedna immutable generacija; inače backpressure. *(Urađeno preko šava `WalFactory`; pravi `WalSegments.create` stiže sa WAL modulom.)*
+- [x] `GET` (CP1 §11): aktivna → immutable → SSTable čiji opseg pokriva ključ. Bira se najveći `sequence`; tombstone daje `NOT_FOUND`. Čitanje drži read lock tokom cele pretrage.
+- [x] `MergingIterator` i `SCAN` (CP1 §12): min-heap, grupisanje **svih** verzija istog ključa, pobednik po najvećem `sequence`, tombstone se ne emituje i ne broji u `limit`, `endExclusive` se nikad ne emituje. Read lock se drži tokom celog skeniranja (osnova).
+- [x] `MaintenanceHost` za Ilijin flush i compaction (§5.1): nepromenljiv `EngineView`, zamena pogleda i buđenje pisaca pod write lock-om.
+- [x] HTTP serveri na `8080` i `8082` (bootstrap, router, `ErrorEnvelope`, JSON pomoćnik) — **do M0**, da ostali mogu da kače svoje handler-e.
+- [x] Javni API (PI §17–§18): `X-Request-Id` (1–64, `[A-Za-z0-9._:-]`, vraća se u odgovoru), `X-Request-Timeout-Ms` (100..10000, podrazumevano 5000, pretvara se u `deadlineNanos`), strogi standardni Base64 sa dopunom (dužina mora biti deljiva sa 4, jer Java dekoder inače prihvata i nedopunjen ulaz), najviše 262 144 dekodirana bajta (`VALUE_TOO_LARGE`), `Cache-Control: no-store`, bez stack trace-ova i apsolutnih putanja u odgovorima, `partitionId=0`, `epoch=0`, scan sa `observedPartitions:[{"partitionId":0,"epoch":0}]`.
+- [x] `GET /health/live` i `GET /health/ready` na `8082` (`503` sa stanjem životnog ciklusa dok nije spreman).
 
 **Failpoint-i koje postavlja:** `wal.after-sync.before-memtable`, `memtable.after-apply.before-response`, `rotation.after-new-wal-sync.before-switch`, `rotation.after-switch.before-flush`, `scan.after-snapshot.before-merge`.
 
