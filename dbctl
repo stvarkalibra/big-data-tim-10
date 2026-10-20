@@ -44,7 +44,7 @@ case "$COMMAND" in
     SHIFT_COMMAND="$1"
     shift
     echo "Running offline inspection..."
-    exec java -cp dlsm-server/target/dlsm-server-1.0-SNAPSHOT.jar rs.raf.dlsm.Main inspect "$SHIFT_COMMAND" "$@"
+    exec java -cp dlsm-server/target/dlsm-server-1.0-SNAPSHOT.jar rs.raf.dlsm.server.Main inspect "$SHIFT_COMMAND" "$@"
     ;;
   *)
     echo "Usage: ./dbctl {build|up standalone|down|reset|status|logs|test|inspect}"
