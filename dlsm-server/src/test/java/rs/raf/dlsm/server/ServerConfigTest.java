@@ -20,6 +20,23 @@ class ServerConfigTest {
     }
 
     @Test
+    void testModeIsOffUnlessExactlyTrue() {
+        assertFalse(ServerConfig.fromEnv(Map.of()).testMode());
+        assertFalse(ServerConfig.fromEnv(Map.of("TEST_MODE", "false")).testMode());
+        assertTrue(ServerConfig.fromEnv(Map.of("TEST_MODE", "true")).testMode());
+        assertTrue(ServerConfig.onPorts(0, 0).withTestMode(true).testMode());
+    }
+
+    @Test
+    void rejectsAmbiguousTestMode() {
+        for (String value : new String[] {"", "TRUE", "yes", "1", "true "}) {
+            IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                    () -> ServerConfig.fromEnv(Map.of("TEST_MODE", value)), value);
+            assertTrue(e.getMessage().contains("TEST_MODE"));
+        }
+    }
+
+    @Test
     void readsMemtableMaxBytes() {
         assertEquals(4096, ServerConfig.fromEnv(
                 Map.of("MEMTABLE_MAX_BYTES", "4096")).memtableMaxBytes());
