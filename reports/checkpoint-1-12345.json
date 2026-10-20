@@ -1,0 +1,8 @@
+{
+  "scenarioId" : "CP1-MDL-001",
+  "seed" : 12345,
+  "status" : "FAILED",
+  "failurePhase" : "GET_MISMATCH",
+  "diagnostics" : "Key key-1 should be present (200), got 404",
+  "artifactPaths" : null
+}
