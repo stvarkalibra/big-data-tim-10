@@ -5,7 +5,11 @@ import rs.raf.dlsm.common.Lifecycle;
 import rs.raf.dlsm.common.StorageException;
 import rs.raf.dlsm.common.UncheckedStorageException;
 import rs.raf.dlsm.engine.Engine;
+import rs.raf.dlsm.engine.EngineConfig;
 import rs.raf.dlsm.engine.StorageEngine;
+import rs.raf.dlsm.failpoint.FailpointRegistry;
+import rs.raf.dlsm.failpoint.Failpoints;
+import rs.raf.dlsm.failpoint.NoOpFailpoints;
 import rs.raf.dlsm.log.JsonLog;
 import rs.raf.dlsm.server.http.HealthRoutes;
 import rs.raf.dlsm.server.http.HttpServerHost;
@@ -19,6 +23,7 @@ import java.net.InetSocketAddress;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 
 /**
  * One standalone process: the admin server on 8082, the storage engine and
@@ -32,11 +37,18 @@ public final class StandaloneNode implements AutoCloseable {
     private final HttpServerHost publicHost;
     /** One instance for the whole node: every module counts into it (CP1 §24). */
     private final StorageStats stats = new StorageStats();
+    /** Present only with {@code TEST_MODE=true} (PI §16.6, §21). */
+    private final FailpointRegistry failpointRegistry;
     private volatile StorageEngine engine;
     private volatile NodeStatus status;
     private volatile boolean stopping;
 
     private StandaloneNode(ServerConfig config, JsonLog log) throws IOException {
+        // Failpoints exist only in test mode; otherwise every hit is a no-op.
+        failpointRegistry = config.testMode() ? new FailpointRegistry(true) : null;
+        Failpoints failpoints = failpointRegistry != null
+                ? failpointRegistry : new NoOpFailpoints();
+
         Router admin = new Router();
         HealthRoutes.register(admin, config.nodeId(), this::lifecycle);
         // Registered before the admin server starts (the router must not
@@ -55,7 +67,8 @@ public final class StandaloneNode implements AutoCloseable {
         try {
             // TODO(recovery): open the durable engine over the data directory;
             // until then the node keeps data in memory only (milestone M1).
-            Engine opened = Engine.openInMemory(config.engineConfig());
+            Engine opened = Engine.openInMemory(
+                    new EngineConfig(config.memtableMaxBytes(), failpoints));
             engine = opened;
             status = new NodeStatus(config.nodeId(), opened, stats);
 
@@ -104,6 +117,14 @@ public final class StandaloneNode implements AutoCloseable {
     /** The node's shared counters. */
     public StorageStats stats() {
         return stats;
+    }
+
+    /**
+     * The failpoint registry that the failpoint admin routes manage; empty
+     * outside test mode, where failpoints cannot be armed at all.
+     */
+    public Optional<FailpointRegistry> failpointRegistry() {
+        return Optional.ofNullable(failpointRegistry);
     }
 
     private NodeStatus nodeStatus() {
