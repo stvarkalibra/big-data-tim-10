@@ -13,7 +13,9 @@ import java.util.Objects;
  *   <li>{@code DLSM_PUBLIC_PORT} — public API port, default {@code 8080};</li>
  *   <li>{@code DLSM_ADMIN_PORT} — admin/test port, default {@code 8082};</li>
  *   <li>{@code MEMTABLE_MAX_BYTES} — MemTable rotation threshold, default
- *       1 MiB (CP1 §10).</li>
+ *       1 MiB (CP1 §10);</li>
+ *   <li>{@code TEST_MODE} — {@code true} enables failpoints and other
+ *       state-changing test controls (PI §16.6), default {@code false}.</li>
  * </ul>
  *
  * <p>The graded ports are fixed (PI §17.1); the port overrides exist so the
@@ -21,12 +23,13 @@ import java.util.Objects;
  * the OS for a free port.
  */
 public record ServerConfig(String nodeId, int publicPort, int adminPort,
-                           long memtableMaxBytes) {
+                           long memtableMaxBytes, boolean testMode) {
 
     public static final String NODE_ID = "NODE_ID";
     public static final String PUBLIC_PORT = "DLSM_PUBLIC_PORT";
     public static final String ADMIN_PORT = "DLSM_ADMIN_PORT";
     public static final String MEMTABLE_MAX_BYTES = "MEMTABLE_MAX_BYTES";
+    public static final String TEST_MODE = "TEST_MODE";
 
     public static final String DEFAULT_NODE_ID = "standalone";
     public static final int DEFAULT_PUBLIC_PORT = 8080;
@@ -47,6 +50,11 @@ public record ServerConfig(String nodeId, int publicPort, int adminPort,
         }
     }
 
+    /** Outside test mode. */
+    public ServerConfig(String nodeId, int publicPort, int adminPort, long memtableMaxBytes) {
+        this(nodeId, publicPort, adminPort, memtableMaxBytes, false);
+    }
+
     /** Defaults for everything except the ports, e.g. for tests on port 0. */
     public static ServerConfig onPorts(int publicPort, int adminPort) {
         return new ServerConfig(DEFAULT_NODE_ID, publicPort, adminPort,
@@ -61,11 +69,29 @@ public record ServerConfig(String nodeId, int publicPort, int adminPort,
                 (int) number(env, PUBLIC_PORT, DEFAULT_PUBLIC_PORT, 5),
                 (int) number(env, ADMIN_PORT, DEFAULT_ADMIN_PORT, 5),
                 number(env, MEMTABLE_MAX_BYTES,
-                        EngineConfig.DEFAULT_MEMTABLE_MAX_BYTES, 18));
+                        EngineConfig.DEFAULT_MEMTABLE_MAX_BYTES, 18),
+                flag(env, TEST_MODE));
+    }
+
+    /** Same settings with test mode switched on or off. */
+    public ServerConfig withTestMode(boolean enabled) {
+        return new ServerConfig(nodeId, publicPort, adminPort, memtableMaxBytes, enabled);
     }
 
     public EngineConfig engineConfig() {
         return new EngineConfig(memtableMaxBytes);
+    }
+
+    /** Exactly {@code true} or {@code false}; anything else is a configuration error. */
+    private static boolean flag(Map<String, String> env, String name) {
+        String text = env.get(name);
+        if (text == null || text.equals("false")) {
+            return false;
+        }
+        if (text.equals("true")) {
+            return true;
+        }
+        throw new IllegalArgumentException("Invalid " + name + " (expected true or false)");
     }
 
     /** Plain decimal digits; the digit limit keeps parsing overflow-free. */
