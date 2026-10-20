@@ -3,7 +3,11 @@ package rs.raf.dlsm.sstable;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.condition.EnabledOnOs;
+import org.junit.jupiter.api.condition.OS;
+
 import rs.raf.dlsm.common.InternalRecord;
+import rs.raf.dlsm.common.Kind;
 import rs.raf.dlsm.engine.OpContext;
 import rs.raf.dlsm.failpoint.FailpointNames;
 import rs.raf.dlsm.failpoint.FailpointRegistry;
@@ -24,33 +28,22 @@ class SSTablePersistenceTest {
     @TempDir
     Path directory;
 
-    private record Paths(Path temporary, Path finished) {
+    private record Paths(
+            Path temporary,
+            Path finished
+    ) {
     }
 
-    private Paths paths(long id) {
+    private Paths paths(long tableId) {
         return new Paths(
                 directory.resolve("lsm/tmp")
                         .resolve(
-                                SSTableMeta.fileName(id) + ".tmp"),
+                                SSTableMeta.fileName(tableId)
+                                        + ".tmp"),
                 directory.resolve("lsm/sst")
-                        .resolve(SSTableMeta.fileName(id))
+                        .resolve(
+                                SSTableMeta.fileName(tableId))
         );
-    }
-
-    private static List<InternalRecord> records(int count) {
-        List<InternalRecord> result = new ArrayList<>();
-
-        for (int i = 0; i < count; i++) {
-            result.add(
-                    InternalRecord.put(
-                            String.format("key%05d", i),
-                            i + 1L,
-                            new byte[100]
-                    )
-            );
-        }
-
-        return result;
     }
 
     private static SSTableDiskWriter writer(
@@ -65,7 +58,26 @@ class SSTablePersistenceTest {
         return OpContext.background();
     }
 
-    private void armIoFailure(
+    private static List<InternalRecord> records(
+            int count) {
+
+        List<InternalRecord> result =
+                new ArrayList<>();
+
+        for (int i = 0; i < count; i++) {
+            result.add(
+                    InternalRecord.put(
+                            String.format("key%05d", i),
+                            i + 1L,
+                            new byte[100]
+                    )
+            );
+        }
+
+        return result;
+    }
+
+    private static void armIoFailure(
             FailpointRegistry registry,
             String failpoint) {
 
@@ -83,6 +95,7 @@ class SSTablePersistenceTest {
     }
 
     @Test
+    @EnabledOnOs(OS.LINUX)
     void writesValidSstableOnDisk() throws Exception {
         Paths p = paths(101);
 
@@ -109,35 +122,50 @@ class SSTablePersistenceTest {
 
         assertDoesNotThrow(
                 () -> SSTableValidator.validateFully(
-                        p.finished(), meta)
+                        p.finished(),
+                        meta
+                )
         );
 
         var source = DiskSSTableTableSource.open(
-                p.finished(), meta);
+                p.finished(),
+                meta
+        );
 
         assertEquals(
                 1L,
                 source.get("key00000")
-                        .orElseThrow().sequence()
+                        .orElseThrow()
+                        .sequence()
         );
 
         assertEquals(
                 300L,
                 source.get("key00299")
-                        .orElseThrow().sequence()
+                        .orElseThrow()
+                        .sequence()
         );
     }
 
     @Test
-    void preservesDeleteAndEmptyPut() throws Exception {
+    @EnabledOnOs(OS.LINUX)
+    void preservesDeleteAndEmptyPut()
+            throws Exception {
+
         Paths p = paths(102);
 
         List<InternalRecord> data = List.of(
                 InternalRecord.put(
-                        "alpha", 5, new byte[]{1, 2}),
+                        "alpha",
+                        5,
+                        new byte[]{1, 2}
+                ),
                 InternalRecord.delete("beta", 6),
                 InternalRecord.put(
-                        "gamma", 7, new byte[0])
+                        "gamma",
+                        7,
+                        new byte[0]
+                )
         );
 
         SSTableMeta meta = writer(
@@ -152,25 +180,32 @@ class SSTablePersistenceTest {
         );
 
         var source = DiskSSTableTableSource.open(
-                p.finished(), meta);
+                p.finished(),
+                meta
+        );
 
-        assertTrue(
+        assertEquals(
+                Kind.DELETE,
                 source.get("beta")
-                        .orElseThrow().tombstone()
+                        .orElseThrow()
+                        .kind()
         );
 
         assertArrayEquals(
                 new byte[0],
                 source.get("gamma")
-                        .orElseThrow().value()
+                        .orElseThrow()
+                        .value()
         );
     }
 
     @Test
+    @EnabledOnOs(OS.LINUX)
     void writesManyBlocksWithoutInMemorySstable()
             throws Exception {
 
         Paths p = paths(103);
+
         List<InternalRecord> data = records(2000);
 
         SSTableMeta meta = writer(
@@ -184,15 +219,18 @@ class SSTablePersistenceTest {
                 context()
         );
 
-        assertEquals(2000, meta.entryCount());
+        assertEquals(2000L, meta.entryCount());
 
         var source = DiskSSTableTableSource.open(
-                p.finished(), meta);
+                p.finished(),
+                meta
+        );
 
         assertEquals(
                 2000L,
                 source.get("key01999")
-                        .orElseThrow().sequence()
+                        .orElseThrow()
+                        .sequence()
         );
     }
 
@@ -227,7 +265,7 @@ class SSTablePersistenceTest {
     }
 
     @Test
-    void writeFailureLeavesNoFinalTable()
+    void incompleteInputIsNotPublished()
             throws Exception {
 
         Paths p = paths(105);
@@ -344,8 +382,6 @@ class SSTablePersistenceTest {
                 )
         );
 
-        // Renamed, but no successful directory fsync.
-        // It is still not published in the manifest.
         assertTrue(Files.exists(p.finished()));
         assertFalse(Files.exists(p.temporary()));
     }
@@ -359,6 +395,7 @@ class SSTablePersistenceTest {
         Files.createDirectories(
                 p.temporary().getParent()
         );
+
         Files.write(
                 p.temporary(),
                 new byte[]{1, 2, 3}
@@ -387,6 +424,8 @@ class SSTablePersistenceTest {
                 before,
                 Files.readAllBytes(p.temporary())
         );
+
+        assertFalse(Files.exists(p.finished()));
     }
 
     @Test
@@ -413,5 +452,57 @@ class SSTablePersistenceTest {
         );
 
         assertFalse(Files.exists(p.temporary()));
+    }
+
+    @Test
+    void noReplaceRejectsExistingDestination()
+            throws Exception {
+
+        Path source = directory.resolve("source.tmp");
+        Path target = directory.resolve("existing.sst");
+
+        Files.write(source, new byte[]{1, 2});
+        Files.write(target, new byte[]{9, 8, 7});
+
+        byte[] original = Files.readAllBytes(target);
+
+        DefaultStorageIO io = new DefaultStorageIO(
+                new FailpointRegistry(false)
+        );
+
+        assertThrows(
+                java.nio.file.FileAlreadyExistsException.class,
+                () -> io.atomicMoveNoReplace(
+                        source,
+                        target,
+                        null,
+                        context()
+                )
+        );
+
+        assertArrayEquals(
+                original,
+                Files.readAllBytes(target)
+        );
+
+        assertTrue(Files.exists(source));
+    }
+
+    @Test
+    void missingDirectoryCannotBeFsynced()
+            throws Exception {
+
+        DefaultStorageIO io = new DefaultStorageIO(
+                new FailpointRegistry(false)
+        );
+
+        assertThrows(
+                IOException.class,
+                () -> io.fsyncDirectory(
+                        directory.resolve("does-not-exist"),
+                        null,
+                        context()
+                )
+        );
     }
 }
