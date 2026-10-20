@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  standalone:
+    build: .
+    container_name: dlsm-standalone
+    ports:
+      - "8080:8080"
+      - "8082:8082"
+    environment:
+      - TEST_MODE=true
+      - MEMTABLE_MAX_BYTES=1048576
+      - NODE_ID=standalone
+    volumes:
+      - dlsm_data:/var/lib/dlsm
+    restart: "no"
+    profiles:
+      - standalone
+
+volumes:
+  dlsm_data:

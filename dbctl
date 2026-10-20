@@ -1,0 +1,50 @@
+#!/bin/sh
+
+set -e
+
+COMMAND="$1"
+shift
+
+case "$COMMAND" in
+  build)
+    echo "Building project with Maven wrapper..."
+    ./mvnw clean package -DskipTests
+    docker compose build
+    ;;
+  up)
+    PROFILE="$1"
+    if [ "$PROFILE" = "standalone" ]; then
+      echo "Starting standalone service..."
+      docker compose --profile standalone up -d
+    else
+      echo "Usage: ./dbctl up standalone"
+      exit 1
+    fi
+    ;;
+  down)
+    echo "Stopping containers..."
+    docker compose --profile standalone down
+    ;;
+  reset)
+    echo "Resetting environment (removing volumes and reports)..."
+    docker compose --profile standalone down -v
+    rm -rf reports/*
+    ;;
+  status)
+    docker compose ps
+    ;;
+  logs)
+    docker compose logs -f standalone
+    ;;
+  test)
+    echo "Running test suite..."
+    mvn test -pl dlsm-tests "$@"
+    ;;
+  inspect)
+    echo "Inspect utility placeholder..."
+    ;;
+  *)
+    echo "Usage: ./dbctl {build|up standalone|down|reset|status|logs|test|inspect}"
+    exit 1
+    ;;
+esac
