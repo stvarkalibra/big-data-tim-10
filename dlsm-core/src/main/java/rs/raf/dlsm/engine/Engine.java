@@ -7,6 +7,9 @@ import rs.raf.dlsm.common.Kind;
 import rs.raf.dlsm.common.Lifecycle;
 import rs.raf.dlsm.common.StorageException;
 import rs.raf.dlsm.common.UncheckedStorageException;
+import rs.raf.dlsm.failpoint.FailpointNames;
+import rs.raf.dlsm.failpoint.Failpoints;
+import rs.raf.dlsm.io.InjectedIOException;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -44,8 +47,8 @@ import java.util.function.Function;
  * one frozen generation exists: when the active one fills up again first,
  * writers wait for the flush (backpressure, mode {@code BACKPRESSURED}).
  *
- * <p>Not yet here: recovery, failpoints and statistics. Their places are
- * marked in the code.
+ * <p>The engine's five failpoints (CP1 §26.1) are hit through
+ * {@link EngineConfig#failpoints()}; outside test mode they do nothing.
  */
 public final class Engine implements StorageEngine, MaintenanceHost {
 
@@ -58,6 +61,7 @@ public final class Engine implements StorageEngine, MaintenanceHost {
     /** Signalled when the frozen slot becomes free; bound to the write lock. */
     private final Condition rotationSlotFree = engineLock.writeLock().newCondition();
     private final long memtableMaxBytes;
+    private final Failpoints failpoints;
     private final WalFactory walFactory;
     private final SequenceAllocator sequences;
     private final Object failureLock = new Object();
@@ -104,6 +108,7 @@ public final class Engine implements StorageEngine, MaintenanceHost {
            SequenceAllocator sequences, EngineView initialView) {
         Objects.requireNonNull(config, "config");
         this.memtableMaxBytes = config.memtableMaxBytes();
+        this.failpoints = config.failpoints();
         this.walFactory = Objects.requireNonNull(walFactory, "walFactory");
         this.activeLog = Objects.requireNonNull(activeLog, "activeLog");
         this.sequences = Objects.requireNonNull(sequences, "sequences");
@@ -242,7 +247,8 @@ public final class Engine implements StorageEngine, MaintenanceHost {
                         "WAL append or force failed", e));
             }
 
-            // failpoint: wal.after-sync.before-memtable
+            // Durable, not yet visible: a crash here must still replay it.
+            failpoint(FailpointNames.WAL_AFTER_SYNC_BEFORE_MEMTABLE, ctx);
             try {
                 active.apply(record);                             // step 8
             } catch (RuntimeException e) {
@@ -253,7 +259,8 @@ public final class Engine implements StorageEngine, MaintenanceHost {
             // This mutation may have filled the active generation while the
             // frozen one still waits: from now on writers are backpressured.
             updatePressureLocked();
-            // failpoint: memtable.after-apply.before-response
+            // Durable and applied, the client does not know yet.
+            failpoint(FailpointNames.MEMTABLE_AFTER_APPLY_BEFORE_RESPONSE, ctx);
 
             return new MutationResult(sequence);
         } finally {
@@ -416,7 +423,14 @@ public final class Engine implements StorageEngine, MaintenanceHost {
             throw new StorageException(ErrorCode.STORAGE_IO, null,
                     "Cannot create a new WAL segment", e);
         }
-        // failpoint: rotation.after-new-wal-sync.before-switch
+        // New segment durable, old pair still current: a crash here leaves
+        // an empty finalized segment for recovery to retire.
+        try {
+            failpoint(FailpointNames.ROTATION_AFTER_NEW_WAL_SYNC_BEFORE_SWITCH, ctx);
+        } catch (StorageException e) {
+            nextLog.close();
+            throw e;
+        }
 
         // Step 2: freeze the old generation together with its WAL segment.
         ImmutableMemTable frozen = active.freeze(List.of(activeLog.segmentId()));
@@ -429,7 +443,8 @@ public final class Engine implements StorageEngine, MaintenanceHost {
         view = new EngineView(frozen, view.tables());
         previousLog.close();
         updatePressureLocked();
-        // failpoint: rotation.after-switch.before-flush
+        // Pair switched, flush not yet requested.
+        failpoint(FailpointNames.ROTATION_AFTER_SWITCH_BEFORE_FLUSH, ctx);
 
         // Step 4: hand the frozen generation to the flush worker.
         flushScheduler.flushNeeded();
@@ -646,7 +661,9 @@ public final class Engine implements StorageEngine, MaintenanceHost {
                 }
             }
 
-            // failpoint: scan.after-snapshot.before-merge
+            // Snapshot taken: the read lock keeps it stable, so a PAUSE here
+            // shows writers waiting and the scan seeing the old state (API-005).
+            failpoint(FailpointNames.SCAN_AFTER_SNAPSHOT_BEFORE_MERGE, ctx);
             try {
                 return new ScanResult(LiveScan.collect(
                         sources, startInclusive, endExclusive, limit));
@@ -699,6 +716,23 @@ public final class Engine implements StorageEngine, MaintenanceHost {
         EngineMode current = mode;
         if (current != EngineMode.SERVING && current != EngineMode.BACKPRESSURED) {
             throw new StorageException(ErrorCode.NODE_NOT_READY, message);
+        }
+    }
+
+    /**
+     * Hits an engine failpoint (CP1 §26.1). These five points do no I/O of
+     * their own, so {@code IO_ERROR} is not one of their mappings; if a
+     * rule injects one anyway, the engine treats it as an unexpected
+     * internal failure and enters FAILED rather than guess an outcome
+     * (TEAM CHOICE, docs/ODLUKE.md). {@code PAUSE} and {@code CRASH} act
+     * inside the failpoint implementation.
+     */
+    private void failpoint(String name, OpContext ctx) throws StorageException {
+        try {
+            failpoints.hit(name, ctx);
+        } catch (InjectedIOException e) {
+            throw fail(new StorageException(ErrorCode.INTERNAL_ERROR, null,
+                    "Injected failure at " + name, e));
         }
     }
 
