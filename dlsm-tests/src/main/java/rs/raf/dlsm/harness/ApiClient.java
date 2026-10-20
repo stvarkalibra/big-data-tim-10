@@ -40,6 +40,20 @@ public class ApiClient {
         return client.send(request, HttpResponse.BodyHandlers.ofString());
     }
 
+    /** {@code GET /v1/scan?start=&end=&limit=} (PI §18.6); keys need no escaping. */
+    public HttpResponse<String> scan(String start, String end, int limit,
+                                     String requestId, long timeoutMs) throws Exception {
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/v1/scan?start=" + start + "&end=" + end
+                        + "&limit=" + limit))
+                .header("X-Request-Id", requestId)
+                .header("X-Request-Timeout-Ms", String.valueOf(timeoutMs))
+                .GET()
+                .build();
+
+        return client.send(request, HttpResponse.BodyHandlers.ofString());
+    }
+
     public HttpResponse<String> delete(String key, String requestId, long timeoutMs) throws Exception {
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(baseUrl + "/v1/kv/" + key))

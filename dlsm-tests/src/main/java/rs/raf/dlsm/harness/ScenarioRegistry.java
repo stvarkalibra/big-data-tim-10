@@ -1,5 +1,6 @@
 package rs.raf.dlsm.harness;
 
+import rs.raf.dlsm.scenarios.Cp1Api003;
 import rs.raf.dlsm.scenarios.Cp1Mdl001;
 
 import java.util.Collections;
@@ -28,6 +29,7 @@ public class ScenarioRegistry {
 
     static {
         ScenarioRegistry.register("CP1-MDL-001", Cp1Mdl001::run);
+        register(Cp1Api003.ID, Cp1Api003::run);
         // Ovde ćemo kasnije registrovati svih 33 scenarija (API, WAL, FLS, SST, CMP, MDL)
         // Primer privremene registracije za testiranje harness-a:
         register("CP1-API-001", (seed, report) -> {
