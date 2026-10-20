@@ -14,13 +14,16 @@ public class Cp1Mdl001 {
         ReferenceModel model = new ReferenceModel();
 
         // 1. Pokretanje čvora baze preko NodeController-a
-        try (NodeController node = NodeController.startStandalone(8080, 8082)) {
+        int publicPort = 18080;
+        int adminPort = 18082;
+
+        try (NodeController node = NodeController.startStandalone(publicPort, adminPort)) {
             node.awaitReady(10000);
 
-            ApiClient api = new ApiClient(8080);
-            AdminClient admin = new AdminClient(8082);
+            ApiClient api = new ApiClient(publicPort);
+            AdminClient admin = new AdminClient(adminPort);
 
-            int opCount = 1000; // Može se povećati na 10000+ prema planu
+            int opCount = 1000;
             for (int i = 0; i < opCount; i++) {
                 String requestId = "CP1-MDL-001-" + seed + "-" + i;
                 int choice = random.nextInt(100);

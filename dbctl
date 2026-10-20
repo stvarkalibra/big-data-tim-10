@@ -37,11 +37,14 @@ case "$COMMAND" in
     docker compose logs -f standalone
     ;;
   test)
-    echo "Running test suite..."
-    mvn test -pl dlsm-tests "$@"
+    echo "Running test suite with Maven Wrapper..."
+    ./mvnw test -pl dlsm-tests "$@"
     ;;
   inspect)
-    echo "Inspect utility placeholder..."
+    SHIFT_COMMAND="$1"
+    shift
+    echo "Running offline inspection..."
+    exec java -cp dlsm-server/target/dlsm-server-1.0-SNAPSHOT.jar rs.raf.dlsm.Main inspect "$SHIFT_COMMAND" "$@"
     ;;
   *)
     echo "Usage: ./dbctl {build|up standalone|down|reset|status|logs|test|inspect}"

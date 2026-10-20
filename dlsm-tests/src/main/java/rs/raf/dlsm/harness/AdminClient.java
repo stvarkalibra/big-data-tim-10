@@ -41,4 +41,20 @@ public class AdminClient {
                 .build();
         return client.send(request, HttpResponse.BodyHandlers.ofString());
     }
+
+    public HttpResponse<String> releaseFailpoint(String token) throws Exception {
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/admin/v1/failpoints/" + token + "/release"))
+                .POST(HttpRequest.BodyPublishers.noBody())
+                .build();
+        return client.send(request, HttpResponse.BodyHandlers.ofString());
+    }
+
+    public HttpResponse<String> getFailpointCatalog() throws Exception {
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/admin/v1/failpoints/catalog"))
+                .GET()
+                .build();
+        return client.send(request, HttpResponse.BodyHandlers.ofString());
+    }
 }

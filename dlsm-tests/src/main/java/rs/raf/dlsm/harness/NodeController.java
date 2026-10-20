@@ -11,6 +11,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 public class NodeController implements AutoCloseable {
     private Process process;
@@ -39,14 +40,17 @@ public class NodeController implements AutoCloseable {
 
         List<String> command = new ArrayList<>();
         command.add(javaBin);
-        command.add("-Dserver.port=" + port);
-        command.add("-Dadmin.port=" + adminPort);
-        command.add("-Ddata.dir=" + dataDir.toAbsolutePath().toString());
-        command.add("-Dtest.mode=" + testMode);
         command.add("-jar");
         command.add(jarPath);
 
         ProcessBuilder pb = new ProcessBuilder(command);
+
+        Map<String, String> env = pb.environment();
+        env.put("DLSM_PUBLIC_PORT", String.valueOf(port));
+        env.put("DLSM_ADMIN_PORT", String.valueOf(adminPort));
+        env.put("DLSM_DATA_DIR", dataDir.toAbsolutePath().toString());
+        env.put("TEST_MODE", String.valueOf(testMode));
+
         pb.redirectOutput(Redirect.INHERIT);
         pb.redirectError(Redirect.INHERIT);
         this.process = pb.start();

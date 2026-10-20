@@ -6,13 +6,18 @@ import rs.raf.dlsm.io.InjectedIOException;
 import java.util.Map;
 import java.util.OptionalInt;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.locks.LockSupport;
 
 public class FailpointRegistry implements Failpoints {
 
     public enum Action {
         PAUSE, CRASH, IO_ERROR, RETURN_ERROR
+    }
+
+    public enum State {
+        ARMED, TRIGGERED, RELEASED, EXHAUSTED
     }
 
     public static class Rule {
@@ -25,6 +30,9 @@ public class FailpointRegistry implements Failpoints {
         private final Map<String, String> parameters;
         private final AtomicInteger hitCount = new AtomicInteger(0);
         private final AtomicInteger triggerCount = new AtomicInteger(0);
+
+        private volatile State state = State.ARMED;
+        private volatile CountDownLatch latch;
 
         public Rule(String token, String name, Action action, int afterHits, int maxTriggers, long pauseTimeoutMs, Map<String, String> parameters) {
             this.token = token;
@@ -39,12 +47,20 @@ public class FailpointRegistry implements Failpoints {
         public String getToken() { return token; }
         public String getName() { return name; }
         public Action getAction() { return action; }
+        public State getState() { return state; }
         public Map<String, String> getParameters() { return parameters; }
+
+        public void release() {
+            if (latch != null) {
+                latch.countDown();
+            }
+            state = State.RELEASED;
+        }
     }
 
     private final boolean testMode;
     private final Map<String, Rule> rulesByToken = new ConcurrentHashMap<>();
-    private final Map<String, Rule> rulesByName = new ConcurrentHashMap<>(); // pojednostavljeno: 1 pravilo po imenu za CP1
+    private final Map<String, Rule> rulesByName = new ConcurrentHashMap<>();
 
     public FailpointRegistry(boolean testMode) {
         this.testMode = testMode;
@@ -62,6 +78,17 @@ public class FailpointRegistry implements Failpoints {
         }
     }
 
+    public void releaseRule(String token) {
+        Rule r = rulesByToken.get(token);
+        if (r != null) {
+            r.release();
+        }
+    }
+
+    public Map<String, Rule> getRulesByToken() {
+        return rulesByToken;
+    }
+
     public void clear() {
         rulesByToken.clear();
         rulesByName.clear();
@@ -70,7 +97,7 @@ public class FailpointRegistry implements Failpoints {
     @Override
     public void hit(String name, OpContext ctx) throws InjectedIOException {
         if (!testMode) {
-            return; // Failpoint-i rade samo u testnom režimu
+            return;
         }
 
         Rule rule = rulesByName.get(name);
@@ -78,12 +105,21 @@ public class FailpointRegistry implements Failpoints {
             return;
         }
 
+        // Filtriranje po requestId ako je zadata parametarska vrednost
+        if (rule.getParameters().containsKey("requestId")) {
+            String expectedRequestId = rule.getParameters().get("requestId");
+            if (ctx != null && ctx.requestId() != null && !ctx.requestId().equals(expectedRequestId)) {
+                return;
+            }
+        }
+
         int currentHits = rule.hitCount.incrementAndGet();
         if (currentHits <= rule.afterHits) {
             return;
         }
 
-        if (rule.triggerCount.get() >= rule.maxTriggers && rule.maxTriggers > 0) {
+        if (rule.maxTriggers > 0 && rule.triggerCount.get() >= rule.maxTriggers) {
+            rule.state = State.EXHAUSTED;
             return;
         }
 
@@ -91,17 +127,26 @@ public class FailpointRegistry implements Failpoints {
 
         switch (rule.getAction()) {
             case CRASH:
-                // Kill procesa bez shutdown hook-ova (Exit code 137 po planu)
+                rule.state = State.TRIGGERED;
                 Runtime.getRuntime().halt(137);
                 break;
             case PAUSE:
-                // Pauza sa zadatim timeout-om
-                LockSupport.parkNanos(rule.pauseTimeoutMs * 1_000_000L);
+                rule.state = State.TRIGGERED;
+                rule.latch = new CountDownLatch(1);
+                try {
+                    rule.latch.await(rule.pauseTimeoutMs, TimeUnit.MILLISECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                if (rule.state != State.RELEASED) {
+                    rule.state = State.EXHAUSTED;
+                }
                 break;
             case IO_ERROR:
+                rule.state = State.TRIGGERED;
                 throw new InjectedIOException(rule.getName(), "Injected I/O error by rule token: " + rule.getToken());
             case RETURN_ERROR:
-                // Može se implementirati po potrebi
+                rule.state = State.TRIGGERED;
                 break;
         }
     }
