@@ -161,4 +161,29 @@ class ScenarioRunnerTest {
         assertEquals(ScenarioRunner.EXIT_FAILED, ScenarioRunner.runCases(List.of("CP1-API-003"),
                 id -> (seed, r) -> r.pass(), SEED, notADirectory));
     }
+
+    @Test
+    void skippedScenarioFailsTheRun() throws Exception {
+        int exit = ScenarioRunner.runCases(List.of("CP1-API-003", "CP1-WAL-001"), Map.of(
+                "CP1-API-003", (ScenarioRegistry.RunnableScenario) (seed, r) -> r.pass(),
+                "CP1-WAL-001", (seed, r) -> r.skip("NOT_IMPLEMENTED", "later"))::get,
+                SEED, reports);
+
+        // A skipped mandatory scenario makes the whole suite fail (PI §25.3).
+        assertEquals(ScenarioRunner.EXIT_FAILED, exit);
+        JsonNode skipped = report(SEED).get("cases").get(1);
+        assertEquals("SKIPPED", skipped.get("status").textValue());
+        assertEquals("NOT_IMPLEMENTED", skipped.get("failurePhase").textValue());
+    }
+
+    @Test
+    void skipCannotHideAFailure() {
+        Report report = execute((seed, r) -> {
+            r.fail("GET_MISMATCH", "expected 200", null);
+            r.skip("NOT_IMPLEMENTED", "later");
+        });
+
+        assertEquals(Report.Status.FAILED, report.getStatus());
+        assertEquals("GET_MISMATCH", report.getFailurePhase());
+    }
 }

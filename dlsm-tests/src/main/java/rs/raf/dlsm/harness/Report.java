@@ -15,6 +15,7 @@ public class Report {
     private String failurePhase;
     private String diagnostics;
     private List<String> artifactPaths = List.of();
+    private boolean hasVerdict;
 
     public Report(String scenarioId, long seed) {
         this.scenarioId = scenarioId;
@@ -26,7 +27,22 @@ public class Report {
     public void pass() {
         if (status != Status.FAILED) {
             this.status = Status.PASSED;
+            this.hasVerdict = true;
         }
+    }
+
+    /**
+     * Records that the scenario did not run, e.g. because it is not
+     * implemented yet. A skipped mandatory scenario fails the suite (PI §25.3).
+     */
+    public void skip(String phase, String diagnostics) {
+        if (status == Status.FAILED) {
+            return;
+        }
+        this.status = Status.SKIPPED;
+        this.failurePhase = phase;
+        this.diagnostics = diagnostics;
+        this.hasVerdict = true;
     }
 
     /**
@@ -39,6 +55,7 @@ public class Report {
             return;
         }
         this.status = Status.FAILED;
+        this.hasVerdict = true;
         this.failurePhase = phase;
         this.diagnostics = diagnostics;
         this.artifactPaths = artifactPaths == null ? List.of() : List.copyOf(artifactPaths);
@@ -47,6 +64,8 @@ public class Report {
     public String getScenarioId() { return scenarioId; }
     public long getSeed() { return seed; }
     public Status getStatus() { return status; }
+    /** Whether the scenario called {@link #pass}, {@link #fail} or {@link #skip}. */
+    public boolean hasVerdict() { return hasVerdict; }
     public String getFailurePhase() { return failurePhase; }
     public String getDiagnostics() { return diagnostics; }
     /** Never {@code null}; empty when the scenario saved no artifacts. */

@@ -31,7 +31,8 @@ import java.util.Objects;
  * }
  * </pre>
  *
- * <p>A failed entry also has {@code failurePhase} and {@code diagnostics}.
+ * <p>A failed or skipped entry also has {@code failurePhase} and
+ * {@code diagnostics}, e.g. {@code NOT_IMPLEMENTED}.
  * The seed is a string, as in the specification, so a 64-bit seed survives
  * JSON readers that use doubles.
  */
@@ -112,7 +113,7 @@ public final class SuiteReport {
             item.put("durationMs", entry.durationMs());
             ArrayNode artifacts = item.putArray("artifactPaths");
             report.getArtifactPaths().forEach(artifacts::add);
-            if (report.getStatus() == Report.Status.FAILED) {
+            if (report.getStatus() != Report.Status.PASSED) {
                 item.put("failurePhase", report.getFailurePhase());
                 item.put("diagnostics", report.getDiagnostics());
             }

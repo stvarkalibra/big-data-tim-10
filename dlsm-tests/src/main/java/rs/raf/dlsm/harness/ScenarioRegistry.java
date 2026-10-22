@@ -1,49 +1,82 @@
-
 package rs.raf.dlsm.harness;
 
 import rs.raf.dlsm.scenarios.Cp1Api003;
 import rs.raf.dlsm.scenarios.Cp1Mdl001;
 import rs.raf.dlsm.scenarios.Cp1Sst006;
 
-import java.util.Collections;
-import java.util.LinkedHashMap;
+import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
-public class ScenarioRegistry {
-
-    private static final Map<String, RunnableScenario> scenarios =
-            new LinkedHashMap<>();
+/**
+ * The 33 stable scenario IDs of Checkpoint 1 (CP1 §29), in the order of the
+ * specification, and the scenarios implemented so far (plan §5.2, §6.5).
+ *
+ * <p>{@code --list} and a full run always cover all 33 IDs. An ID without an
+ * implementation is reported as {@code SKIPPED} with the phase
+ * {@code NOT_IMPLEMENTED}, never as passed, so the suite fails until every
+ * scenario exists (PI §25.3).
+ */
+public final class ScenarioRegistry {
 
     public interface RunnableScenario {
         void run(long seed, Report report) throws Exception;
     }
 
-    public static void register(
-            String id,
-            RunnableScenario scenario) {
+    /** CP1 §29.1–§29.6. */
+    public static final List<String> CHECKPOINT_1_IDS = List.of(
+            "CP1-API-001", "CP1-API-002", "CP1-API-003", "CP1-API-004", "CP1-API-005",
+            "CP1-WAL-001", "CP1-WAL-002", "CP1-WAL-003", "CP1-WAL-004",
+            "CP1-WAL-005", "CP1-WAL-006", "CP1-WAL-007", "CP1-WAL-008",
+            "CP1-FLS-001", "CP1-FLS-002", "CP1-FLS-003", "CP1-FLS-004",
+            "CP1-FLS-005", "CP1-FLS-006", "CP1-FLS-007",
+            "CP1-SST-001", "CP1-SST-002", "CP1-SST-003",
+            "CP1-SST-004", "CP1-SST-005", "CP1-SST-006",
+            "CP1-CMP-001", "CP1-CMP-002", "CP1-CMP-003", "CP1-CMP-004", "CP1-CMP-005",
+            "CP1-MDL-001", "CP1-MDL-002");
 
-        scenarios.put(id, scenario);
-    }
+    public static final String NOT_IMPLEMENTED = "NOT_IMPLEMENTED";
 
-    public static Set<String> getScenarioIds() {
-        return Collections.unmodifiableSet(
-                scenarios.keySet()
-        );
-    }
-
-    public static RunnableScenario get(String id) {
-        return scenarios.get(id);
-    }
+    private static final Map<String, RunnableScenario> implemented = new HashMap<>();
 
     static {
-        register("CP1-MDL-001", Cp1Mdl001::run);
-
         register(Cp1Api003.ID, Cp1Api003::run);
-
         register(Cp1Sst006.ID, Cp1Sst006::run);
+        register("CP1-MDL-001", Cp1Mdl001::run);
+    }
 
-        // Only real scenarios are registered: a placeholder that just passes
-        // would report PASSED for a rule nobody checked (PI §25.3).
+    private ScenarioRegistry() {
+    }
+
+    /** Adds the implementation of one of the 33 IDs. */
+    public static void register(String id, RunnableScenario scenario) {
+        if (!CHECKPOINT_1_IDS.contains(id)) {
+            throw new IllegalArgumentException("Not a Checkpoint 1 scenario ID: " + id);
+        }
+        if (implemented.putIfAbsent(id, scenario) != null) {
+            throw new IllegalStateException("Scenario registered twice: " + id);
+        }
+    }
+
+    /** All 33 IDs in the order of the specification. */
+    public static List<String> getScenarioIds() {
+        return CHECKPOINT_1_IDS;
+    }
+
+    public static boolean isImplemented(String id) {
+        return implemented.containsKey(id);
+    }
+
+    /**
+     * @return the scenario for {@code id}; for a Checkpoint 1 ID without an
+     *         implementation, one that reports {@code SKIPPED}; {@code null}
+     *         for an unknown ID
+     */
+    public static RunnableScenario get(String id) {
+        RunnableScenario scenario = implemented.get(id);
+        if (scenario != null || !CHECKPOINT_1_IDS.contains(id)) {
+            return scenario;
+        }
+        return (seed, report) -> report.skip(NOT_IMPLEMENTED, "Scenario is not implemented yet");
     }
 }
