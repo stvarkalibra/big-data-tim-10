@@ -29,6 +29,7 @@ final class RecordingStorageIO implements StorageIO {
 
     private final DefaultStorageIO delegate;
     private final List<String> calls = new ArrayList<>();
+    private final List<Integer> writeSizes = new ArrayList<>();
     private String failingCall;
 
     RecordingStorageIO(Failpoints failpoints) {
@@ -45,8 +46,14 @@ final class RecordingStorageIO implements StorageIO {
         return List.copyOf(calls);
     }
 
+    /** Byte count of each {@code writeFully} call, in order. */
+    List<Integer> writeSizes() {
+        return List.copyOf(writeSizes);
+    }
+
     void clearCalls() {
         calls.clear();
+        writeSizes.clear();
     }
 
     @Override
@@ -59,6 +66,7 @@ final class RecordingStorageIO implements StorageIO {
     public void writeFully(FileChannel ch, ByteBuffer buf, String fpBefore, OpContext ctx)
             throws IOException {
         record("writeFully", null);
+        writeSizes.add(buf.remaining());
         delegate.writeFully(ch, buf, fpBefore, ctx);
     }
 
