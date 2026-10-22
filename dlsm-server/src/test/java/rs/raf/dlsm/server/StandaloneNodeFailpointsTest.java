@@ -16,6 +16,8 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -50,6 +52,32 @@ class StandaloneNodeFailpointsTest {
                 HttpResponse.BodyHandlers.ofString());
     }
 
+    private HttpResponse<String> admin(String method, String path, String body)
+            throws Exception {
+        return client.send(HttpRequest.newBuilder(
+                        URI.create("http://127.0.0.1:" + node.adminPort() + path))
+                        .method(method, body == null
+                                ? HttpRequest.BodyPublishers.noBody()
+                                : HttpRequest.BodyPublishers.ofString(body))
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+    }
+
+    private String failpointState(String token) throws Exception {
+        HttpResponse<String> response = admin("GET", "/admin/v1/failpoints/" + token, null);
+        assertEquals(200, response.statusCode());
+        return MAPPER.readTree(response.body()).get("state").asText();
+    }
+
+    /** Bounded polling of the visible failpoint state (PI §21.1). */
+    private void awaitState(String token, String expected) throws Exception {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (!failpointState(token).equals(expected)) {
+            assertTrue(System.nanoTime() - deadline < 0, token + " never became " + expected);
+            Thread.onSpinWait();
+        }
+    }
+
     private HttpResponse<String> ready() throws Exception {
         return client.send(HttpRequest.newBuilder(
                         URI.create("http://127.0.0.1:" + node.adminPort() + "/health/ready"))
@@ -63,6 +91,8 @@ class StandaloneNodeFailpointsTest {
 
         assertTrue(node.failpointRegistry().isEmpty());
         assertEquals(200, put("alpha").statusCode());
+        // The control API does not exist outside test mode.
+        assertEquals(404, admin("GET", "/admin/v1/failpoints/catalog", null).statusCode());
     }
 
     @Test
@@ -82,5 +112,62 @@ class StandaloneNodeFailpointsTest {
         HttpResponse<String> health = ready();
         assertEquals(503, health.statusCode());
         assertEquals("FAILED", MAPPER.readTree(health.body()).get("lifecycle").asText());
+    }
+
+    @Test
+    void catalogIsServedOnTheAdminPort() throws Exception {
+        start(true);
+
+        HttpResponse<String> catalog = admin("GET", "/admin/v1/failpoints/catalog", null);
+        assertEquals(200, catalog.statusCode());
+        assertEquals(21, MAPPER.readTree(catalog.body()).get("failpoints").size());
+    }
+
+    @Test
+    void pausedPutContinuesAfterReleaseOverHttp() throws Exception {
+        start(true);
+        HttpResponse<String> armed = admin("PUT", "/admin/v1/failpoints/pause-1", """
+                {"name": "%s", "action": "PAUSE", "filters": {"requestId": "fp-gamma"}}
+                """.formatted(FailpointNames.MEMTABLE_AFTER_APPLY_BEFORE_RESPONSE));
+        assertEquals(200, armed.statusCode());
+        assertEquals("ARMED", failpointState("pause-1"));
+
+        CompletableFuture<HttpResponse<String>> paused =
+                CompletableFuture.supplyAsync(() -> {
+                    try {
+                        return put("gamma");
+                    } catch (Exception e) {
+                        throw new IllegalStateException(e);
+                    }
+                });
+        awaitState("pause-1", "TRIGGERED");
+        // The paused PUT holds the mutation lock, but the admin port still answers.
+        assertFalse(paused.isDone());
+        assertEquals(200, admin("GET", "/health/live", null).statusCode());
+
+        HttpResponse<String> released =
+                admin("POST", "/admin/v1/failpoints/pause-1/release", null);
+        assertTrue(MAPPER.readTree(released.body()).get("released").asBoolean());
+        assertEquals(200, paused.get(5, TimeUnit.SECONDS).statusCode());
+        assertEquals("RELEASED", failpointState("pause-1"));
+
+        assertEquals(200, admin("DELETE", "/admin/v1/failpoints", null).statusCode());
+        assertEquals("UNKNOWN", failpointState("pause-1"));
+    }
+
+    @Test
+    void returnErrorAfterApplyAnswersWithItsCategoryAndKeepsServing() throws Exception {
+        start(true);
+        admin("PUT", "/admin/v1/failpoints/ret-1", """
+                {"name": "%s", "action": "RETURN_ERROR", "errorCode": "TEST_FAULT"}
+                """.formatted(FailpointNames.MEMTABLE_AFTER_APPLY_BEFORE_RESPONSE));
+
+        HttpResponse<String> failed = put("delta");
+        assertEquals(500, failed.statusCode());
+        assertEquals("INTERNAL_ERROR", MAPPER.readTree(failed.body()).get("code").asText());
+
+        // Durable and applied before the hook: the engine keeps serving.
+        assertEquals(200, ready().statusCode());
+        assertEquals(200, put("epsilon").statusCode());
     }
 }
