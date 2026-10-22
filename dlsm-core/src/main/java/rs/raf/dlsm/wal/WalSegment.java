@@ -119,9 +119,18 @@ public final class WalSegment implements MutationLog {
         return prefix;
     }
 
+    /**
+     * The durability point of a mutation (CP1 §9 step 7, I1).
+     * {@code wal.after-append.before-sync} fires right before the force;
+     * with {@code IO_ERROR} the force does not happen and the complete but
+     * unforced frame has an unknown outcome. {@code walForcesSucceeded}
+     * counts only a force that returned normally (CP1 §24).
+     */
     @Override
     public void force(OpContext ctx) throws IOException {
-        io.force(channel, null, ctx);
+        stats.increment("walForceAttempts");
+        io.force(channel, FailpointNames.WAL_AFTER_APPEND_BEFORE_SYNC, ctx);
+        stats.increment("walForcesSucceeded");
     }
 
     /**
