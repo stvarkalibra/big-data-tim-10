@@ -3,6 +3,7 @@ package rs.raf.dlsm.wal;
 import rs.raf.dlsm.common.InternalRecord;
 import rs.raf.dlsm.engine.MutationLog;
 import rs.raf.dlsm.engine.OpContext;
+import rs.raf.dlsm.failpoint.FailpointNames;
 import rs.raf.dlsm.failpoint.Failpoints;
 import rs.raf.dlsm.io.StorageIO;
 import rs.raf.dlsm.log.JsonLog;
@@ -14,6 +15,7 @@ import java.nio.channels.FileChannel;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
+import java.util.OptionalInt;
 
 /**
  * One durable WAL segment opened for appending: the engine's
@@ -25,6 +27,12 @@ import java.util.Objects;
  * a time.
  */
 public final class WalSegment implements MutationLog {
+
+    /** Failpoint parameter choosing the prefix length (CP1 §26.1). */
+    public static final String PREFIX_PARAMETER = "prefixBytes";
+
+    /** First write without a configured prefix: the guarded length header. */
+    public static final int DEFAULT_PREFIX_BYTES = WalFormat.FRAME_GUARD_BYTES;
 
     private final long segmentId;
     private final FileChannel channel;
@@ -48,9 +56,67 @@ public final class WalSegment implements MutationLog {
         return segmentId;
     }
 
+    /**
+     * Writes one complete frame in two {@link StorageIO} calls, a strict
+     * prefix and then the rest, so {@code wal.after-record-prefix} always
+     * sits between them (CP1 §26.1):
+     *
+     * <ul>
+     *   <li>{@code wal.before-append} fires before the first byte; with
+     *       {@code IO_ERROR} nothing of the frame is written;</li>
+     *   <li>{@code wal.after-record-prefix} fires after exactly
+     *       {@code prefixBytes} bytes; with {@code CRASH} only that prefix is
+     *       on disk, with {@code IO_ERROR} it stays as an uncertain tail.</li>
+     * </ul>
+     *
+     * The prefix length is the rule's {@code prefixBytes} parameter, kept
+     * within {@code 1..frameLength-1}, or {@value #DEFAULT_PREFIX_BYTES}
+     * (the guarded length header) without one. Counters follow CP1 §24.
+     */
     @Override
     public void append(InternalRecord record, OpContext ctx) throws IOException {
-        io.writeFully(channel, ByteBuffer.wrap(WalCodec.encodeFrame(record)), null, ctx);
+        byte[] frame = WalCodec.encodeFrame(record);
+        int prefix = prefixLength(record, frame.length, ctx);
+
+        stats.increment("walAppendAttempts");
+
+        io.writeFully(channel, ByteBuffer.wrap(frame, 0, prefix),
+                FailpointNames.WAL_BEFORE_APPEND, ctx);
+        stats.add("walBytesWritten", prefix);
+
+        io.writeFully(channel, ByteBuffer.wrap(frame, prefix, frame.length - prefix),
+                FailpointNames.WAL_AFTER_RECORD_PREFIX, ctx);
+        stats.add("walBytesWritten", frame.length - prefix);
+
+        stats.increment("walAppendsCompleted");
+    }
+
+    /**
+     * Length of the first write. A configured {@code prefixBytes} is logged
+     * with the real frame length, so a test can repeat the exact cut.
+     */
+    private int prefixLength(InternalRecord record, int frameLength, OpContext ctx)
+            throws IOException {
+
+        OptionalInt configured = failpoints.intParameter(
+                FailpointNames.WAL_AFTER_RECORD_PREFIX, ctx, PREFIX_PARAMETER);
+        if (configured.isEmpty()) {
+            return DEFAULT_PREFIX_BYTES;
+        }
+
+        int prefix = Math.clamp(configured.getAsInt(), 1, frameLength - 1);
+
+        Map<String, Object> fields = new LinkedHashMap<>();
+        fields.put("requestId", ctx == null ? null : ctx.requestId());
+        fields.put("failpointName", FailpointNames.WAL_AFTER_RECORD_PREFIX);
+        fields.put("walSegmentId", segmentId);
+        fields.put("sequence", record.sequence());
+        fields.put("fileOffset", channel.position());
+        fields.put("message", "prefixBytes=" + prefix + " (configured "
+                + configured.getAsInt() + "), frameLength=" + frameLength);
+        log.info("WAL_RECORD_PREFIX", fields);
+
+        return prefix;
     }
 
     @Override
