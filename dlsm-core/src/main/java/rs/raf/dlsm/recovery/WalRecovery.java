@@ -166,4 +166,21 @@ public final class WalRecovery {
 
         return protectingSegments.isEmpty() ? null : recovered.freeze(protectingSegments);
     }
+
+    /**
+     * Step 11: {@code max(flushedThroughSequence, greatest valid WAL sequence)};
+     * the next mutation gets this plus one. Every valid frame counts, also a
+     * version that a later one replaced, so no durable sequence is reused.
+     * A torn final frame never held its sequence and does not count
+     * (CP1 §21.2 step 11).
+     *
+     * @return the value for {@code RecoveredState.lastUsedSequence}
+     */
+    static long lastUsedSequence(WalLogScan scan, long flushedThroughSequence) {
+        if (flushedThroughSequence < 0) {
+            throw new IllegalArgumentException(
+                    "flushedThroughSequence must not be negative: " + flushedThroughSequence);
+        }
+        return Math.max(flushedThroughSequence, scan.lastSequence().orElse(0));
+    }
 }
