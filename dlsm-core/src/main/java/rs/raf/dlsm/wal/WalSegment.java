@@ -41,6 +41,10 @@ public final class WalSegment implements MutationLog {
     private final StorageStats stats;
     private final JsonLog log;
 
+    /** First append or force failure; the tail is uncertain from then on. */
+    private volatile Exception failure;
+    private volatile boolean closed;
+
     WalSegment(long segmentId, FileChannel channel, StorageIO io, Failpoints failpoints,
                StorageStats stats, JsonLog log) {
         this.segmentId = segmentId;
@@ -75,20 +79,53 @@ public final class WalSegment implements MutationLog {
      */
     @Override
     public void append(InternalRecord record, OpContext ctx) throws IOException {
+        requireUsable();
         byte[] frame = WalCodec.encodeFrame(record);
-        int prefix = prefixLength(record, frame.length, ctx);
 
-        stats.increment("walAppendAttempts");
+        try {
+            int prefix = prefixLength(record, frame.length, ctx);
 
-        io.writeFully(channel, ByteBuffer.wrap(frame, 0, prefix),
-                FailpointNames.WAL_BEFORE_APPEND, ctx);
-        stats.add("walBytesWritten", prefix);
+            stats.increment("walAppendAttempts");
 
-        io.writeFully(channel, ByteBuffer.wrap(frame, prefix, frame.length - prefix),
-                FailpointNames.WAL_AFTER_RECORD_PREFIX, ctx);
-        stats.add("walBytesWritten", frame.length - prefix);
+            io.writeFully(channel, ByteBuffer.wrap(frame, 0, prefix),
+                    FailpointNames.WAL_BEFORE_APPEND, ctx);
+            stats.add("walBytesWritten", prefix);
 
-        stats.increment("walAppendsCompleted");
+            io.writeFully(channel, ByteBuffer.wrap(frame, prefix, frame.length - prefix),
+                    FailpointNames.WAL_AFTER_RECORD_PREFIX, ctx);
+            stats.add("walBytesWritten", frame.length - prefix);
+
+            stats.increment("walAppendsCompleted");
+        } catch (IOException | RuntimeException e) {
+            markUncertain(e);
+            throw e;
+        }
+    }
+
+    /**
+     * True after any append or force failed. The bytes at the end of the
+     * file are then unknown, so this segment never takes another record or
+     * force (CP1 §9.3); only recovery may classify and truncate the tail.
+     */
+    public boolean hasUncertainTail() {
+        return failure != null;
+    }
+
+    private void requireUsable() throws IOException {
+        if (closed) {
+            throw new IOException("WAL segment " + segmentId + " is closed");
+        }
+        Exception cause = failure;
+        if (cause != null) {
+            throw new IOException("WAL segment " + segmentId
+                    + " has an uncertain tail after an earlier failure", cause);
+        }
+    }
+
+    private void markUncertain(Exception cause) {
+        if (failure == null) {
+            failure = cause;
+        }
     }
 
     /**
@@ -128,9 +165,16 @@ public final class WalSegment implements MutationLog {
      */
     @Override
     public void force(OpContext ctx) throws IOException {
-        stats.increment("walForceAttempts");
-        io.force(channel, FailpointNames.WAL_AFTER_APPEND_BEFORE_SYNC, ctx);
-        stats.increment("walForcesSucceeded");
+        requireUsable();
+
+        try {
+            stats.increment("walForceAttempts");
+            io.force(channel, FailpointNames.WAL_AFTER_APPEND_BEFORE_SYNC, ctx);
+            stats.increment("walForcesSucceeded");
+        } catch (IOException | RuntimeException e) {
+            markUncertain(e);
+            throw e;
+        }
     }
 
     /**
@@ -139,6 +183,7 @@ public final class WalSegment implements MutationLog {
      */
     @Override
     public void close() {
+        closed = true;
         try {
             channel.close();
         } catch (IOException e) {
