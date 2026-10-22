@@ -88,7 +88,56 @@ public final class WalRecovery {
                 layout.walDir(), layout.tmpDir(), io, failpoints, stats, ids, log);
         WalSegment active = segments.createSegment(ctx);
 
-        return new WalRecoveryResult(lastUsed, recovered, active, segments, scan);
+        List<Long> retired;
+        try {
+            retired = retireSegments(scan, flushedThroughSequence, ctx);               // 13
+        } catch (IOException | RuntimeException e) {
+            active.close();
+            throw e;
+        }
+
+        return new WalRecoveryResult(lastUsed, recovered, active, segments, scan, retired);
+    }
+
+    /**
+     * Step 13, after the new active segment exists: deletes every old
+     * segment that holds no frame, or whose frames all lie at or below
+     * {@code flushedThroughSequence} (already published in SSTables), then
+     * forces {@code lsm/wal/}. A segment with any record above the mark
+     * protects the recovered generation and stays, even when an older
+     * neighbour is deleted.
+     *
+     * <p>Safe to interrupt: a crash midway leaves segments that the next
+     * recovery classifies the same way and deletes again.
+     *
+     * @return IDs of the deleted segments, in increasing order
+     */
+    List<Long> retireSegments(WalLogScan scan, long flushedThroughSequence, OpContext ctx)
+            throws IOException {
+
+        List<Long> retired = new ArrayList<>();
+
+        for (WalScanResult segment : scan.segments()) {
+            boolean empty = segment.entries().isEmpty();
+            boolean covered = segment.lastSequence().isPresent()
+                    && segment.lastSequence().getAsLong() <= flushedThroughSequence;
+
+            if (empty || covered) {
+                io.delete(layout.walDir().resolve(WalFileNames.segmentFileName(segment.segmentId())));
+                retired.add(segment.segmentId());
+            }
+        }
+
+        if (!retired.isEmpty()) {
+            io.fsyncDirectory(layout.walDir(), null, ctx);
+
+            Map<String, Object> fields = new LinkedHashMap<>();
+            fields.put("message", "Deleted WAL segments " + retired
+                    + " (empty or covered through sequence " + flushedThroughSequence + ")");
+            log.info("WAL_SEGMENTS_RETIRED", fields);
+        }
+
+        return List.copyOf(retired);
     }
 
     /**

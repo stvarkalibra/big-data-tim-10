@@ -5,6 +5,7 @@ import rs.raf.dlsm.wal.WalLogScan;
 import rs.raf.dlsm.wal.WalSegment;
 import rs.raf.dlsm.wal.WalSegments;
 
+import java.util.List;
 import java.util.Objects;
 
 /**
@@ -19,13 +20,16 @@ import java.util.Objects;
  * @param activeLog           the new, durable, empty active segment
  * @param walFactory          creates later segments on rotation
  * @param scan                the log as read, after any torn tail was cut
+ * @param retiredSegmentIds   old segments deleted in step 13: empty, or fully
+ *                            covered by the manifest's high-water mark
  */
 public record WalRecoveryResult(
         long lastUsedSequence,
         ImmutableMemTable recoveredGeneration,
         WalSegment activeLog,
         WalSegments walFactory,
-        WalLogScan scan) {
+        WalLogScan scan,
+        List<Long> retiredSegmentIds) {
 
     public WalRecoveryResult {
         if (lastUsedSequence < 0) {
@@ -34,5 +38,6 @@ public record WalRecoveryResult(
         Objects.requireNonNull(activeLog, "activeLog");
         Objects.requireNonNull(walFactory, "walFactory");
         Objects.requireNonNull(scan, "scan");
+        retiredSegmentIds = List.copyOf(retiredSegmentIds);
     }
 }
