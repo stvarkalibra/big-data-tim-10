@@ -1,0 +1,15 @@
+# The repository stores text with LF. Shell scripts keep LF on every
+# checkout, including Windows, so sh, Docker and WSL can run them.
+* text=auto
+
+mvnw text eol=lf
+dbctl text eol=lf
+*.sh text eol=lf
+Dockerfile text eol=lf
+
+# Windows scripts keep CRLF.
+mvnw.cmd text eol=crlf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+*.jar binary
