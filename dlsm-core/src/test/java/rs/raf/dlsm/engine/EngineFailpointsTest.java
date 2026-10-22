@@ -17,6 +17,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -202,5 +203,127 @@ class EngineFailpointsTest {
 
         assertThrows(StorageException.class, () -> engine.put("alpha", bytes("A"), ctx("p1")));
         assertEquals(EngineMode.FAILED, engine.mode());
+    }
+
+    // ---------- RETURN_ERROR and PAUSE timeouts (PI §21.1) ----------
+
+    private Engine engineWith(FailpointRegistry.Rule rule, long memtableMaxBytes) {
+        FailpointRegistry registry = new FailpointRegistry(true);
+        registry.addRule(rule);
+        return TestEngines.withoutFlusher(new EngineConfig(memtableMaxBytes, registry));
+    }
+
+    private static FailpointRegistry.Rule returnError(String name) {
+        return new FailpointRegistry.Rule("t-" + name, name,
+                FailpointRegistry.Action.RETURN_ERROR, 0, 1, 0, Map.of(), "TEST_FAULT");
+    }
+
+    private static StorageException injected(ThrowingCall call) {
+        StorageException e = assertThrows(StorageException.class, call::run);
+        assertEquals(ErrorCode.INTERNAL_ERROR, e.code());
+        assertEquals("TEST_FAULT", e.category());
+        return e;
+    }
+
+    @FunctionalInterface
+    private interface ThrowingCall {
+        void run() throws Exception;
+    }
+
+    @Test
+    void returnErrorAfterForceFailsTheEngine() {
+        Engine engine = engineWith(returnError(FailpointNames.WAL_AFTER_SYNC_BEFORE_MEMTABLE), 1 << 20);
+
+        injected(() -> engine.put("alpha", bytes("A"), ctx("p1")));
+
+        // Durable but not applied: only WAL replay may continue from here.
+        assertEquals(EngineMode.FAILED, engine.mode());
+        assertEquals("TEST_FAULT", engine.lastFatalError().orElseThrow().category());
+    }
+
+    @Test
+    void returnErrorAfterApplyFailsOnlyThatRequest() throws Exception {
+        Engine engine = engineWith(
+                returnError(FailpointNames.MEMTABLE_AFTER_APPLY_BEFORE_RESPONSE), 1 << 20);
+
+        injected(() -> engine.put("alpha", bytes("A"), ctx("p1")));
+
+        // Durable and applied before the hook: the client outcome is unknown,
+        // the mutation stays, and the engine keeps serving.
+        assertEquals(EngineMode.SERVING, engine.mode());
+        assertEquals("A", get(engine, "alpha"));
+        assertEquals(2, engine.put("beta", bytes("B"), ctx("p2")).sequence());
+    }
+
+    @Test
+    void pauseTimeoutContinuesWithDeadlineExceeded() throws Exception {
+        Engine engine = engineWith(new FailpointRegistry.Rule("t",
+                FailpointNames.MEMTABLE_AFTER_APPLY_BEFORE_RESPONSE,
+                FailpointRegistry.Action.PAUSE, 0, 1, 50, Map.of()), 1 << 20);
+
+        StorageException e = assertThrows(StorageException.class,
+                () -> engine.put("alpha", bytes("A"), ctx("p1")));
+        assertEquals(ErrorCode.DEADLINE_EXCEEDED, e.code());
+        assertEquals(FailpointRegistry.PAUSE_TIMEOUT_CATEGORY, e.category());
+        assertEquals(EngineMode.SERVING, engine.mode());
+        assertEquals("A", get(engine, "alpha"));
+    }
+
+    @Test
+    void returnErrorBeforeSwitchKeepsTheOldPair() throws Exception {
+        Engine engine = engineWith(
+                returnError(FailpointNames.ROTATION_AFTER_NEW_WAL_SYNC_BEFORE_SWITCH), 70);
+        engine.put("k1", bytes("v"), ctx("p1"));
+        engine.put("k2", bytes("v"), ctx("p2"));
+
+        injected(() -> engine.put("k3", bytes("v"), ctx("p3")));
+
+        assertEquals(EngineMode.SERVING, engine.mode());
+        assertNull(engine.currentView().immutable(), "the pair was never switched");
+        assertNull(get(engine, "k3"), "the mutation failed before its sequence");
+
+        // The rule fired once; the next writer rotates normally.
+        engine.put("k3", bytes("v"), ctx("p4"));
+        assertEquals(1, engine.currentView().immutable().generation());
+    }
+
+    @Test
+    void returnErrorAfterSwitchStillRequestsTheFlush() throws Exception {
+        Engine engine = engineWith(
+                returnError(FailpointNames.ROTATION_AFTER_SWITCH_BEFORE_FLUSH), 70);
+        AtomicInteger flushRequests = new AtomicInteger();
+        engine.setFlushScheduler(new FlushScheduler() {
+            @Override
+            public void flushNeeded() {
+                flushRequests.incrementAndGet();
+            }
+
+            @Override
+            public void checkAutoCompaction() {
+            }
+        });
+        engine.put("k1", bytes("v"), ctx("p1"));
+        engine.put("k2", bytes("v"), ctx("p2"));
+
+        injected(() -> engine.put("k3", bytes("v"), ctx("p3")));
+
+        // The switch stands and the frozen generation still goes to flush.
+        assertEquals(1, engine.currentView().immutable().generation());
+        assertEquals(1, flushRequests.get());
+        assertEquals(EngineMode.SERVING, engine.mode());
+        assertNull(get(engine, "k3"));
+        assertEquals("v", get(engine, "k1"));
+    }
+
+    @Test
+    void returnErrorInScanFailsOnlyThatScan() throws Exception {
+        Engine engine = engineWith(
+                returnError(FailpointNames.SCAN_AFTER_SNAPSHOT_BEFORE_MERGE), 1 << 20);
+        engine.put("alpha", bytes("A"), ctx("p1"));
+
+        injected(() -> engine.scan("a", "z", 10, ctx("s1")));
+
+        assertEquals(EngineMode.SERVING, engine.mode());
+        assertEquals(List.of("alpha"), keys(engine.scan("a", "z", 10, ctx("s2"))));
     }
 }

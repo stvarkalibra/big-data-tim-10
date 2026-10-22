@@ -9,6 +9,7 @@ import rs.raf.dlsm.common.StorageException;
 import rs.raf.dlsm.common.UncheckedStorageException;
 import rs.raf.dlsm.failpoint.FailpointNames;
 import rs.raf.dlsm.failpoint.Failpoints;
+import rs.raf.dlsm.failpoint.InjectedFailureException;
 import rs.raf.dlsm.io.InjectedIOException;
 
 import java.io.IOException;
@@ -248,7 +249,13 @@ public final class Engine implements StorageEngine, MaintenanceHost {
             }
 
             // Durable, not yet visible: a crash here must still replay it.
-            failpoint(FailpointNames.WAL_AFTER_SYNC_BEFORE_MEMTABLE, ctx);
+            try {
+                failpoint(FailpointNames.WAL_AFTER_SYNC_BEFORE_MEMTABLE, ctx);
+            } catch (StorageException e) {
+                // Durable but never applied: memory no longer matches the
+                // WAL, so only a restart (WAL replay) may continue.
+                throw fail(e);
+            }
             try {
                 active.apply(record);                             // step 8
             } catch (RuntimeException e) {
@@ -444,7 +451,16 @@ public final class Engine implements StorageEngine, MaintenanceHost {
         previousLog.close();
         updatePressureLocked();
         // Pair switched, flush not yet requested.
-        failpoint(FailpointNames.ROTATION_AFTER_SWITCH_BEFORE_FLUSH, ctx);
+        try {
+            failpoint(FailpointNames.ROTATION_AFTER_SWITCH_BEFORE_FLUSH, ctx);
+        } catch (StorageException e) {
+            // The switch stands, so the frozen generation must still reach
+            // flush, or writers would wait for a slot that never frees.
+            if (mode != EngineMode.FAILED) {
+                flushScheduler.flushNeeded();
+            }
+            throw e;
+        }
 
         // Step 4: hand the frozen generation to the flush worker.
         flushScheduler.flushNeeded();
@@ -726,6 +742,11 @@ public final class Engine implements StorageEngine, MaintenanceHost {
      * internal failure and enters FAILED rather than guess an outcome
      * (TEAM CHOICE, docs/ODLUKE.md). {@code PAUSE} and {@code CRASH} act
      * inside the failpoint implementation.
+     *
+     * <p>{@code RETURN_ERROR}, and a {@code PAUSE} that reached its timeout,
+     * fail only this operation, with the injected code and category; the
+     * caller decides whether its state allows the engine to keep serving
+     * (PI §21.1).
      */
     private void failpoint(String name, OpContext ctx) throws StorageException {
         try {
@@ -733,6 +754,8 @@ public final class Engine implements StorageEngine, MaintenanceHost {
         } catch (InjectedIOException e) {
             throw fail(new StorageException(ErrorCode.INTERNAL_ERROR, null,
                     "Injected failure at " + name, e));
+        } catch (InjectedFailureException e) {
+            throw e.toStorageException();
         }
     }
 
