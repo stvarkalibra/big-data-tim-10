@@ -5,8 +5,9 @@ import java.util.function.BooleanSupplier;
 
 public class Await {
     public static void until(BooleanSupplier condition, Duration timeout, String message) {
-        long deadline = System.currentTimeMillis() + timeout.toMillis();
-        while (System.currentTimeMillis() < deadline) {
+        // Monotonic clock: a wall-clock jump must not stretch or cut the deadline.
+        long deadline = System.nanoTime() + timeout.toNanos();
+        while (System.nanoTime() - deadline < 0) {
             if (condition.getAsBoolean()) {
                 return;
             }

@@ -50,14 +50,17 @@ public final class Cp1Api003 {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final long TIMEOUT_MS = 5000;
+    /** Ports of this scenario only, so it never collides with a running node or another scenario. */
+    private static final int PUBLIC_PORT = 18084;
+    private static final int ADMIN_PORT = 18085;
 
     private Cp1Api003() {
     }
 
     public static void run(long seed, Report report) throws Exception {
-        try (NodeController node = NodeController.startStandalone(8080, 8082)) {
+        try (NodeController node = NodeController.startStandalone(PUBLIC_PORT, ADMIN_PORT)) {
             node.awaitReady(20_000);
-            ApiClient api = new ApiClient(8080);
+            ApiClient api = new ApiClient(PUBLIC_PORT);
             Steps steps = new Steps(api, seed);
 
             steps.put("a", "A");

@@ -13,3 +13,6 @@
 # Environment
 .env
 .env.*
+
+# Test reports and their artifacts (PI §25.3)
+reports/
