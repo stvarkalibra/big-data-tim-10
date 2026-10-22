@@ -3,6 +3,11 @@ package rs.raf.dlsm.harness;
 import rs.raf.dlsm.scenarios.Cp1Api003;
 import rs.raf.dlsm.scenarios.Cp1Mdl001;
 import rs.raf.dlsm.scenarios.Cp1Sst006;
+import rs.raf.dlsm.scenarios.Cp1Sst001;
+import rs.raf.dlsm.scenarios.Cp1Sst002;
+import rs.raf.dlsm.scenarios.Cp1Sst003;
+import rs.raf.dlsm.scenarios.Cp1Sst004;
+import rs.raf.dlsm.scenarios.Cp1Sst005;
 
 import java.util.HashMap;
 import java.util.List;
@@ -43,6 +48,11 @@ public final class ScenarioRegistry {
         register(Cp1Api003.ID, Cp1Api003::run);
         register(Cp1Sst006.ID, Cp1Sst006::run);
         register("CP1-MDL-001", Cp1Mdl001::run);
+        register(Cp1Sst001.ID, Cp1Sst001::run);
+        register(Cp1Sst002.ID, Cp1Sst002::run);
+        register(Cp1Sst003.ID, Cp1Sst003::run);
+        register(Cp1Sst004.ID, Cp1Sst004::run);
+        register(Cp1Sst005.ID, Cp1Sst005::run);
     }
 
     private ScenarioRegistry() {
