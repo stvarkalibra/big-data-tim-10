@@ -6,6 +6,7 @@ import rs.raf.dlsm.common.StorageException;
 import rs.raf.dlsm.engine.ImmutableMemTable;
 import rs.raf.dlsm.engine.MemTable;
 import rs.raf.dlsm.engine.OpContext;
+import rs.raf.dlsm.failpoint.FailpointNames;
 import rs.raf.dlsm.failpoint.Failpoints;
 import rs.raf.dlsm.io.StorageIO;
 import rs.raf.dlsm.log.JsonLog;
@@ -60,7 +61,18 @@ public final class WalRecovery {
     }
 
     /**
-     * Runs CP1 §21.1 steps 7–12 in order.
+     * Runs CP1 §21.1 steps 7–13 in order, with the two WAL recovery
+     * failpoints of CP1 §26.1 on their boundaries:
+     *
+     * <ul>
+     *   <li>{@code recovery.after-wal-tail-truncate} after step 9, on every
+     *       start: the tail is valid on disk, whether or not it had to be cut;</li>
+     *   <li>{@code recovery.after-wal-replay.before-ready} after step 13: the
+     *       WAL suffix exists only in memory and nothing is ready yet.</li>
+     * </ul>
+     *
+     * A {@code CRASH} on either leaves a state the next start recovers from
+     * the same way (CP1-WAL-008).
      *
      * @param flushedThroughSequence the high-water mark of the loaded manifest
      * @param ids                    built from {@code wal/} and {@code tmp/}
@@ -80,6 +92,7 @@ public final class WalRecovery {
 
         WalLogScan scan = scanLog();                                                    // 7–8
         truncateTornTail(scan, ctx);                                                    // 9
+        failpoints.hit(FailpointNames.RECOVERY_AFTER_WAL_TAIL_TRUNCATE, ctx);
         ImmutableMemTable recovered = replay(scan, flushedThroughSequence, memtableMaxBytes); // 10
         long lastUsed = lastUsedSequence(scan, flushedThroughSequence);                // 11
 
@@ -91,6 +104,7 @@ public final class WalRecovery {
         List<Long> retired;
         try {
             retired = retireSegments(scan, flushedThroughSequence, ctx);               // 13
+            failpoints.hit(FailpointNames.RECOVERY_AFTER_WAL_REPLAY_BEFORE_READY, ctx);
         } catch (IOException | RuntimeException e) {
             active.close();
             throw e;
