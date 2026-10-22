@@ -1,0 +1,6 @@
+# The images build the jars themselves; local builds, git history and reports stay out.
+**/target/
+.git/
+.idea/
+*.iml
+reports/
