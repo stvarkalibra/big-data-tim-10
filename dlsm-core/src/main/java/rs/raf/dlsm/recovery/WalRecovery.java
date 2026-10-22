@@ -2,6 +2,7 @@ package rs.raf.dlsm.recovery;
 
 import rs.raf.dlsm.common.ErrorCode;
 import rs.raf.dlsm.common.StorageException;
+import rs.raf.dlsm.engine.OpContext;
 import rs.raf.dlsm.failpoint.Failpoints;
 import rs.raf.dlsm.io.StorageIO;
 import rs.raf.dlsm.log.JsonLog;
@@ -12,9 +13,13 @@ import rs.raf.dlsm.wal.WalReader;
 import rs.raf.dlsm.wal.WalScanResult;
 
 import java.io.IOException;
+import java.nio.channels.FileChannel;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 
 /**
  * The WAL part of startup recovery, CP1 §21.1 steps 7–13: read every segment
@@ -73,5 +78,41 @@ public final class WalRecovery {
         }
 
         return scan;
+    }
+
+    /**
+     * Step 9: when, and only when, the last frame of the whole log is a
+     * strict prefix (a torn tail), truncates that segment to the frame's
+     * start and forces the repair, so a second crash cannot bring the stray
+     * bytes back. A complete frame is never cut (CP1 §16.4).
+     *
+     * @return true if a torn tail was truncated
+     */
+    boolean truncateTornTail(WalLogScan scan, OpContext ctx) throws IOException {
+        Optional<WalScanResult> torn = scan.tornSegment();
+        if (torn.isEmpty()) {
+            return false;
+        }
+
+        WalScanResult segment = torn.get();
+        long cut = segment.tornFrameOffset();
+        Path file = layout.walDir().resolve(WalFileNames.segmentFileName(segment.segmentId()));
+
+        // StorageIO has no call to open an existing file; the repair itself
+        // (truncate and force) goes through it.
+        try (FileChannel channel = FileChannel.open(file, StandardOpenOption.WRITE)) {
+            io.truncate(channel, cut);
+            io.force(channel, null, ctx);
+        }
+        stats.increment("walTornTailsTruncated");
+
+        Map<String, Object> fields = new LinkedHashMap<>();
+        fields.put("walSegmentId", segment.segmentId());
+        fields.put("fileOffset", cut);
+        fields.put("message", "Truncated torn WAL tail of "
+                + (segment.fileSize() - cut) + " bytes; file length was " + segment.fileSize());
+        log.info("WAL_TORN_TAIL_TRUNCATED", fields);
+
+        return true;
     }
 }
