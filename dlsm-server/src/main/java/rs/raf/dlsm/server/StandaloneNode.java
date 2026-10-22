@@ -11,6 +11,7 @@ import rs.raf.dlsm.failpoint.FailpointRegistry;
 import rs.raf.dlsm.failpoint.Failpoints;
 import rs.raf.dlsm.failpoint.NoOpFailpoints;
 import rs.raf.dlsm.log.JsonLog;
+import rs.raf.dlsm.server.http.FailpointRoutes;
 import rs.raf.dlsm.server.http.HealthRoutes;
 import rs.raf.dlsm.server.http.HttpServerHost;
 import rs.raf.dlsm.server.http.KvRoutes;
@@ -58,6 +59,10 @@ public final class StandaloneNode implements AutoCloseable {
                 () -> nodeStatus().acceptedSequence(),
                 () -> nodeStatus().durableSequence(),
                 stats);
+        // The failpoint control API exists only in test mode (PI §21.1).
+        if (failpointRegistry != null) {
+            FailpointRoutes.register(admin, failpointRegistry);
+        }
 
         // Each server is started right after it binds: a JDK HttpServer that
         // was created but never started does not release its port on close.
@@ -147,6 +152,10 @@ public final class StandaloneNode implements AutoCloseable {
     @Override
     public void close() {
         stopping = true;
+        // Paused operations must not keep the engine busy while it closes.
+        if (failpointRegistry != null) {
+            failpointRegistry.clear();
+        }
         publicHost.close();
         adminHost.close();
         engine.close();
