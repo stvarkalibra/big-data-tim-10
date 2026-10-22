@@ -43,9 +43,7 @@ public class ScenarioRegistry {
 
         register(Cp1Sst006.ID, Cp1Sst006::run);
 
-        // Postojeci privremeni scenario.
-        register("CP1-API-001", (seed, report) -> {
-            report.pass();
-        });
+        // Only real scenarios are registered: a placeholder that just passes
+        // would report PASSED for a rule nobody checked (PI §25.3).
     }
 }
