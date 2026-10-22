@@ -25,11 +25,18 @@ public class Report {
         this.status = Status.SKIPPED;
     }
 
+    /** Marks the scenario passed, unless it already failed: a failure is final. */
     public void pass() {
-        this.status = Status.PASSED;
+        if (status != Status.FAILED) {
+            this.status = Status.PASSED;
+        }
     }
 
+    /** Records a failure; the first one wins, since later ones are usually its effects. */
     public void fail(String phase, String diagnostics, List<String> artifactPaths) {
+        if (status == Status.FAILED) {
+            return;
+        }
         this.status = Status.FAILED;
         this.failurePhase = phase;
         this.diagnostics = diagnostics;
