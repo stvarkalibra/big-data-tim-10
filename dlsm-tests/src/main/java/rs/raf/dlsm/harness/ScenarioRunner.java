@@ -1,6 +1,10 @@
 package rs.raf.dlsm.harness;
 
+import java.io.IOException;
+import java.nio.file.Path;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
 
 /**
  * Runs Checkpoint 1 scenarios: {@code --list}, {@code --case ID} and
@@ -8,11 +12,14 @@ import java.util.List;
  *
  * <p>The verdict of a scenario is what its {@link Report} says when it
  * returns: a scenario passes only by calling {@link Report#pass()} and never
- * failing. Every selected case gets a report, even when it cannot start
- * (PI §25.3).
+ * failing. Every selected case gets exactly one entry in
+ * {@code reports/checkpoint-1-<seed>.json}, even when it cannot start, and
+ * the file is rewritten after each case, so it exists before the runner
+ * exits (PI §25.3).
  *
  * <p>Exit codes: {@code 0} when every selected scenario passed, {@code 1}
- * when at least one did not, {@code 64} for an invalid command line.
+ * when at least one did not or the report cannot be written, {@code 64}
+ * for an invalid command line.
  */
 public final class ScenarioRunner {
 
@@ -21,6 +28,8 @@ public final class ScenarioRunner {
     static final int EXIT_USAGE = 64;
 
     static final long DEFAULT_SEED = 12345;
+
+    static final Path REPORTS_DIR = Path.of("reports");
 
     private static final String USAGE =
             "Usage: ScenarioRunner [--list] [--case ID] [--seed N]";
@@ -54,13 +63,32 @@ public final class ScenarioRunner {
         List<String> ids = options.caseId() != null
                 ? List.of(options.caseId())
                 : List.copyOf(ScenarioRegistry.getScenarioIds());
-        System.out.println("Running " + ids.size() + " scenario(s) with seed "
-                + options.seed() + "...");
+        return runCases(ids, ScenarioRegistry::get, options.seed(), REPORTS_DIR);
+    }
+
+    /**
+     * Runs the selected cases in order and writes the run report before the
+     * first case and after each one.
+     *
+     * @param lookup the scenario for an id, or {@code null} if it is unknown
+     */
+    static int runCases(List<String> ids,
+                        Function<String, ScenarioRegistry.RunnableScenario> lookup,
+                        long seed, Path reportsDir) {
+        System.out.println("Running " + ids.size() + " scenario(s) with seed " + seed + "...");
+        SuiteReport suite = new SuiteReport(seed, ids);
+        // Written before the first case too, so even a run killed midway
+        // leaves a report naming every selected case.
+        if (!write(suite, reportsDir)) {
+            return EXIT_FAILED;
+        }
 
         boolean allPassed = true;
         for (String id : ids) {
-            Report report = execute(id, ScenarioRegistry.get(id), options.seed());
-            report.save(options.seed());
+            long started = System.nanoTime();
+            Report report = execute(id, lookup.apply(id), seed);
+            suite.add(report, TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started));
+
             if (report.getStatus() == Report.Status.PASSED) {
                 System.out.println("[PASSED] " + id);
             } else {
@@ -68,8 +96,24 @@ public final class ScenarioRunner {
                 System.err.println("[" + report.getStatus() + "] " + id + " ("
                         + report.getFailurePhase() + "): " + report.getDiagnostics());
             }
+
+            if (!write(suite, reportsDir)) {
+                return EXIT_FAILED;
+            }
         }
+        System.out.println("Report: " + suite.file(reportsDir));
         return allPassed ? EXIT_PASSED : EXIT_FAILED;
+    }
+
+    private static boolean write(SuiteReport suite, Path reportsDir) {
+        try {
+            suite.write(reportsDir);
+            return true;
+        } catch (IOException e) {
+            // Without a report the run cannot be graded or diagnosed.
+            System.err.println("Cannot write the report " + suite.file(reportsDir) + ": " + e);
+            return false;
+        }
     }
 
     /**

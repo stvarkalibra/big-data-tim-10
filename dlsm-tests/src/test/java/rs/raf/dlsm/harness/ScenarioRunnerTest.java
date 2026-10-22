@@ -1,8 +1,14 @@
 package rs.raf.dlsm.harness;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -104,5 +110,55 @@ class ScenarioRunnerTest {
         for (String id : ScenarioRegistry.getScenarioIds()) {
             assertTrue(id.matches("CP1-(API|WAL|FLS|SST|CMP|MDL)-\\d{3}"), id);
         }
+    }
+
+    // ---------- the run report (PI §25.3) ----------
+
+    @TempDir
+    Path reports;
+
+    private JsonNode report(long seed) throws Exception {
+        return new ObjectMapper().readTree(
+                Files.readAllBytes(reports.resolve("checkpoint-1-" + seed + ".json")));
+    }
+
+    @Test
+    void everySelectedCaseGetsOneEntryInOneFile() throws Exception {
+        Map<String, ScenarioRegistry.RunnableScenario> scenarios = Map.of(
+                "CP1-API-001", (seed, r) -> r.pass(),
+                "CP1-API-002", (seed, r) -> {
+                    throw new AssertionError("GET returned 200");
+                });
+        List<String> ids = List.of("CP1-API-001", "CP1-API-404", "CP1-API-002");
+
+        int exit = ScenarioRunner.runCases(ids, scenarios::get, SEED, reports);
+
+        assertEquals(ScenarioRunner.EXIT_FAILED, exit);
+        JsonNode root = report(SEED);
+        assertEquals(3, root.get("selectedCaseIds").size());
+        JsonNode cases = root.get("cases");
+        assertEquals(3, cases.size());
+        assertEquals("PASSED", cases.get(0).get("status").textValue());
+        // An unknown id still gets its entry: setup failed.
+        assertEquals("CP1-API-404", cases.get(1).get("id").textValue());
+        assertEquals("SETUP", cases.get(1).get("failurePhase").textValue());
+        assertEquals("EXECUTION", cases.get(2).get("failurePhase").textValue());
+    }
+
+    @Test
+    void runWhereEveryCasePassesExitsZero() throws Exception {
+        int exit = ScenarioRunner.runCases(List.of("CP1-API-003"),
+                id -> (seed, r) -> r.pass(), SEED, reports);
+
+        assertEquals(ScenarioRunner.EXIT_PASSED, exit);
+        assertEquals("PASSED", report(SEED).get("cases").get(0).get("status").textValue());
+    }
+
+    @Test
+    void reportThatCannotBeWrittenFailsTheRun() throws Exception {
+        Path notADirectory = Files.createFile(reports.resolve("file"));
+
+        assertEquals(ScenarioRunner.EXIT_FAILED, ScenarioRunner.runCases(List.of("CP1-API-003"),
+                id -> (seed, r) -> r.pass(), SEED, notADirectory));
     }
 }
