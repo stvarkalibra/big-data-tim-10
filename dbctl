@@ -2,14 +2,24 @@
 
 set -e
 
-COMMAND="$1"
-shift
+# Every path below is relative to the repository root.
+cd "$(dirname "$0")"
+
+TESTS_JAR=dlsm-tests/target/dlsm-tests-1.0-SNAPSHOT.jar
+SERVER_JAR=dlsm-server/target/dlsm-server-1.0-SNAPSHOT.jar
+TEST_USAGE="Usage: ./dbctl test checkpoint-1 [--list | --seed N | --case ID --seed N]"
+
+COMMAND="${1:-}"
+if [ $# -gt 0 ]; then
+  shift
+fi
 
 case "$COMMAND" in
   build)
-    echo "Building project with Maven wrapper..."
-    ./mvnw clean package -DskipTests
-    docker compose build
+    # The images build the jars themselves (Dockerfile), so the host needs
+    # only Docker. Services with a profile are built only when it is named.
+    echo "Building the standalone and student-tests images..."
+    docker compose --profile standalone --profile tests build
     ;;
   up)
     PROFILE="$1"
@@ -37,8 +47,30 @@ case "$COMMAND" in
     docker compose logs -f standalone
     ;;
   test)
-    echo "Running test suite with Maven Wrapper..."
-    ./mvnw test -pl dlsm-tests "$@"
+    # PI §25.2: the student-tests image runs each scenario against the
+    # production server jar as a child process; reports/ is mounted, so
+    # reports/checkpoint-1-<seed>.json appears here (PI §25.3). The exit
+    # code is the runner's: 0 only when every selected scenario passed.
+    if [ "${1:-}" != "checkpoint-1" ]; then
+      echo "$TEST_USAGE" >&2
+      exit 64
+    fi
+    shift
+    mkdir -p reports
+    if [ "${DLSM_TEST_RUNNER:-docker}" = "host" ]; then
+      # Development without Docker: Java 21 from JAVA_HOME, else from PATH.
+      if [ ! -f "$TESTS_JAR" ] || [ ! -f "$SERVER_JAR" ]; then
+        ./mvnw -q package -DskipTests
+      fi
+      exec "${JAVA_HOME:+$JAVA_HOME/bin/}java" -jar "$TESTS_JAR" "$@"
+    fi
+    case "$(uname -s)" in
+      MINGW*|MSYS*|CYGWIN*)
+        exec docker compose --profile tests run --rm student-tests "$@" ;;
+      *)
+        # Reports are written as the calling user, so `reset` can remove them.
+        exec docker compose --profile tests run --rm --user "$(id -u):$(id -g)" student-tests "$@" ;;
+    esac
     ;;
   inspect)
     SHIFT_COMMAND="$1"
@@ -47,7 +79,7 @@ case "$COMMAND" in
     exec java -cp dlsm-server/target/dlsm-server-1.0-SNAPSHOT.jar rs.raf.dlsm.server.Main inspect "$SHIFT_COMMAND" "$@"
     ;;
   *)
-    echo "Usage: ./dbctl {build|up standalone|down|reset|status|logs|test|inspect}"
+    echo "Usage: ./dbctl {build|up standalone|down|reset|status|logs|test checkpoint-1 ...|inspect}"
     exit 1
     ;;
 esac
