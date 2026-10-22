@@ -52,17 +52,20 @@ public final class ScenarioRunner {
         }
 
         if (options.listOnly()) {
-            System.out.println("Available Checkpoint-1 Scenarios ("
-                    + ScenarioRegistry.getScenarioIds().size() + "/33):");
-            for (String id : ScenarioRegistry.getScenarioIds()) {
-                System.out.println(" - " + id);
+            List<String> ids = ScenarioRegistry.getScenarioIds();
+            long implemented = ids.stream().filter(ScenarioRegistry::isImplemented).count();
+            System.out.println("Checkpoint-1 scenarios: " + ids.size() + " (implemented: "
+                    + implemented + ")");
+            for (String id : ids) {
+                System.out.println(ScenarioRegistry.isImplemented(id)
+                        ? id : id + "  (" + ScenarioRegistry.NOT_IMPLEMENTED + ")");
             }
             return EXIT_PASSED;
         }
 
         List<String> ids = options.caseId() != null
                 ? List.of(options.caseId())
-                : List.copyOf(ScenarioRegistry.getScenarioIds());
+                : ScenarioRegistry.getScenarioIds();
         return runCases(ids, ScenarioRegistry::get, options.seed(), REPORTS_DIR);
     }
 
@@ -139,8 +142,7 @@ public final class ScenarioRunner {
             return report;
         }
 
-        if (report.getStatus() != Report.Status.PASSED
-                && report.getStatus() != Report.Status.FAILED) {
+        if (!report.hasVerdict()) {
             report.fail("VERDICT", "Scenario returned without a verdict", List.of());
         }
         return report;
