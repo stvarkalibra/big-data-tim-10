@@ -8,6 +8,9 @@ cd "$(dirname "$0")"
 TESTS_JAR=dlsm-tests/target/dlsm-tests-1.0-SNAPSHOT.jar
 SERVER_JAR=dlsm-server/target/dlsm-server-1.0-SNAPSHOT.jar
 TEST_USAGE="Usage: ./dbctl test checkpoint-1 [--list | --seed N | --case ID --seed N]"
+INSPECT_USAGE="Usage: ./dbctl inspect wal | sstable <id>"
+READY_URL=http://127.0.0.1:8082/health/ready
+READY_TIMEOUT_S=20
 
 COMMAND="${1:-}"
 if [ $# -gt 0 ]; then
@@ -18,14 +21,27 @@ case "$COMMAND" in
   build)
     # The images build the jars themselves (Dockerfile), so the host needs
     # only Docker. Services with a profile are built only when it is named.
-    echo "Building the standalone and student-tests images..."
-    docker compose --profile standalone --profile tests build
+    echo "Building the standalone, inspect and student-tests images..."
+    docker compose --profile standalone --profile tools --profile tests build
     ;;
   up)
     PROFILE="$1"
     if [ "$PROFILE" = "standalone" ]; then
       echo "Starting standalone service..."
       docker compose --profile standalone up -d
+      # Return only once the node is READY, at most READY_TIMEOUT_S seconds
+      # (plan §6.5), so the next command never races its startup.
+      waited=0
+      until [ "$(curl -s -o /dev/null -w '%{http_code}' "$READY_URL" || true)" = "200" ]; do
+        if [ "$waited" -ge "$READY_TIMEOUT_S" ]; then
+          echo "standalone is not ready after ${READY_TIMEOUT_S} s; last log lines:" >&2
+          docker compose --profile standalone logs --tail 50 standalone >&2
+          exit 1
+        fi
+        sleep 1
+        waited=$((waited + 1))
+      done
+      echo "standalone is ready"
     else
       echo "Usage: ./dbctl up standalone"
       exit 1
@@ -73,13 +89,22 @@ case "$COMMAND" in
     esac
     ;;
   inspect)
-    SHIFT_COMMAND="$1"
-    shift
-    echo "Running offline inspection..."
-    exec java -cp dlsm-server/target/dlsm-server-1.0-SNAPSHOT.jar rs.raf.dlsm.server.Main inspect "$SHIFT_COMMAND" "$@"
+    # CP1 §25: the stopped node's volume is inspected by a short-lived helper
+    # container that mounts it read-only. stdout is the inspector's JSON
+    # report only; the exit code is the inspector's (FORMAT.md §3.7, 64 for
+    # a bad command line).
+    if [ $# -eq 0 ]; then
+      echo "$INSPECT_USAGE" >&2
+      exit 64
+    fi
+    if [ -n "$(docker compose --profile standalone ps -q --status running standalone)" ]; then
+      echo "The standalone node is running; stop it first: ./dbctl down" >&2
+      exit 1
+    fi
+    exec docker compose --profile tools run --rm -T inspect "$@"
     ;;
   *)
-    echo "Usage: ./dbctl {build|up standalone|down|reset|status|logs|test checkpoint-1 ...|inspect}"
+    echo "Usage: ./dbctl {build|up standalone|down|reset|status|logs|test checkpoint-1 ...|inspect wal|sstable <id>}"
     exit 1
     ;;
 esac

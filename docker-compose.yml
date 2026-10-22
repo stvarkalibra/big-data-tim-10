@@ -17,6 +17,19 @@ services:
     profiles:
       - standalone
 
+  # ./dbctl inspect wal | sstable <id>: the server's offline inspector over the
+  # stopped node's volume, mounted read-only so inspection can change nothing.
+  inspect:
+    build:
+      context: .
+      target: standalone
+    entrypoint: ["java", "-jar", "/app/server.jar", "inspect"]
+    volumes:
+      - dlsm_data:/var/lib/dlsm:ro
+    restart: "no"
+    profiles:
+      - tools
+
   # ./dbctl test checkpoint-1 ...: arguments go to the runner, the report to ./reports.
   student-tests:
     build:
