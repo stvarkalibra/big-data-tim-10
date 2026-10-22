@@ -11,9 +11,12 @@ import rs.raf.dlsm.io.StorageIO;
 import rs.raf.dlsm.log.JsonLog;
 import rs.raf.dlsm.stats.StorageStats;
 import rs.raf.dlsm.wal.WalFileNames;
+import rs.raf.dlsm.wal.WalIdAllocator;
 import rs.raf.dlsm.wal.WalLogScan;
 import rs.raf.dlsm.wal.WalReader;
 import rs.raf.dlsm.wal.WalScanResult;
+import rs.raf.dlsm.wal.WalSegment;
+import rs.raf.dlsm.wal.WalSegments;
 
 import java.io.IOException;
 import java.nio.channels.FileChannel;
@@ -54,6 +57,38 @@ public final class WalRecovery {
         this.failpoints = Objects.requireNonNull(failpoints, "failpoints");
         this.stats = Objects.requireNonNull(stats, "stats");
         this.log = Objects.requireNonNull(log, "log");
+    }
+
+    /**
+     * Runs CP1 §21.1 steps 7–12 in order.
+     *
+     * @param flushedThroughSequence the high-water mark of the loaded manifest
+     * @param ids                    built from {@code wal/} and {@code tmp/}
+     *                               before any cleanup (CP1 §16.1), so the new
+     *                               segment's ID is above every segment found
+     * @param memtableMaxBytes       {@code MEMTABLE_MAX_BYTES} for the recovered
+     *                               generation; replay may exceed it
+     * @throws StorageException with the corruption's category when the WAL is corrupt
+     * @throws IOException      when a repair or the new segment cannot be made
+     *                          durable; startup must then fail (CP1 §21.4)
+     */
+    public WalRecoveryResult run(long flushedThroughSequence, WalIdAllocator ids,
+                                 long memtableMaxBytes, OpContext ctx)
+            throws IOException, StorageException {
+
+        Objects.requireNonNull(ids, "ids");
+
+        WalLogScan scan = scanLog();                                                    // 7–8
+        truncateTornTail(scan, ctx);                                                    // 9
+        ImmutableMemTable recovered = replay(scan, flushedThroughSequence, memtableMaxBytes); // 10
+        long lastUsed = lastUsedSequence(scan, flushedThroughSequence);                // 11
+
+        // Step 12: never append to a segment used before the crash.
+        WalSegments segments = new WalSegments(
+                layout.walDir(), layout.tmpDir(), io, failpoints, stats, ids, log);
+        WalSegment active = segments.createSegment(ctx);
+
+        return new WalRecoveryResult(lastUsed, recovered, active, segments, scan);
     }
 
     /**
