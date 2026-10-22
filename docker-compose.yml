@@ -1,8 +1,8 @@
-version: '3.8'
-
 services:
   standalone:
-    build: .
+    build:
+      context: .
+      target: standalone
     container_name: dlsm-standalone
     ports:
       - "8080:8080"
@@ -16,6 +16,17 @@ services:
     restart: "no"
     profiles:
       - standalone
+
+  # ./dbctl test checkpoint-1 ...: arguments go to the runner, the report to ./reports.
+  student-tests:
+    build:
+      context: .
+      target: student-tests
+    volumes:
+      - ./reports:/app/reports
+    restart: "no"
+    profiles:
+      - tests
 
 volumes:
   dlsm_data:

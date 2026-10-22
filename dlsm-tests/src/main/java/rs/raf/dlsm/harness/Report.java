@@ -1,23 +1,20 @@
 package rs.raf.dlsm.harness;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.SerializationFeature;
-
-import java.io.File;
-import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.util.List;
 
+/**
+ * The result of one scenario: the scenario records its verdict here and
+ * {@link SuiteReport} writes it as one entry of the run report (PI §25.3).
+ */
 public class Report {
     public enum Status { PASSED, FAILED, SKIPPED }
 
-    private String scenarioId;
-    private long seed;
+    private final String scenarioId;
+    private final long seed;
     private Status status;
     private String failurePhase;
     private String diagnostics;
-    private List<String> artifactPaths;
+    private List<String> artifactPaths = List.of();
 
     public Report(String scenarioId, long seed) {
         this.scenarioId = scenarioId;
@@ -25,36 +22,33 @@ public class Report {
         this.status = Status.SKIPPED;
     }
 
+    /** Marks the scenario passed, unless it already failed: a failure is final. */
     public void pass() {
-        this.status = Status.PASSED;
-    }
-
-    public void fail(String phase, String diagnostics, List<String> artifactPaths) {
-        this.status = Status.FAILED;
-        this.failurePhase = phase;
-        this.diagnostics = diagnostics;
-        this.artifactPaths = artifactPaths;
-    }
-
-    public void save(long seed) {
-        try {
-            Path reportsDir = Path.of("reports");
-            Files.createDirectories(reportsDir);
-            File file = reportsDir.resolve("checkpoint-1-" + seed + ".json").toFile();
-
-            ObjectMapper mapper = new ObjectMapper();
-            mapper.enable(SerializationFeature.INDENT_OUTPUT);
-            mapper.writeValue(file, this);
-        } catch (IOException e) {
-            System.err.println("Failed to write test report: " + e.getMessage());
+        if (status != Status.FAILED) {
+            this.status = Status.PASSED;
         }
     }
 
-    // Getters and Setters for Jackson serialization
+    /**
+     * Records a failure; the first one wins, since later ones are usually its effects.
+     *
+     * @param artifactPaths trace and inspection files for the failure; may be {@code null}
+     */
+    public void fail(String phase, String diagnostics, List<String> artifactPaths) {
+        if (status == Status.FAILED) {
+            return;
+        }
+        this.status = Status.FAILED;
+        this.failurePhase = phase;
+        this.diagnostics = diagnostics;
+        this.artifactPaths = artifactPaths == null ? List.of() : List.copyOf(artifactPaths);
+    }
+
     public String getScenarioId() { return scenarioId; }
     public long getSeed() { return seed; }
     public Status getStatus() { return status; }
     public String getFailurePhase() { return failurePhase; }
     public String getDiagnostics() { return diagnostics; }
+    /** Never {@code null}; empty when the scenario saved no artifacts. */
     public List<String> getArtifactPaths() { return artifactPaths; }
 }

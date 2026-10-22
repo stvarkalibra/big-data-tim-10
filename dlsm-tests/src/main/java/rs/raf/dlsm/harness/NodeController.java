@@ -12,8 +12,14 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 public class NodeController implements AutoCloseable {
+    /** Env variable with the server jar; the student-tests image sets it (PI §25.2). */
+    public static final String SERVER_JAR_ENV = "DLSM_SERVER_JAR";
+    /** The jar that {@code ./mvnw package} builds, relative to the repository root. */
+    static final String DEFAULT_SERVER_JAR = "dlsm-server/target/dlsm-server-1.0-SNAPSHOT.jar";
+
     private Process process;
     private final Path dataDir;
     private final int port;
@@ -36,12 +42,12 @@ public class NodeController implements AutoCloseable {
     public void start(boolean testMode) throws IOException {
         String javaHome = System.getProperty("java.home");
         String javaBin = javaHome + File.separator + "bin" + File.separator + "java";
-        String jarPath = "dlsm-server/target/dlsm-server-1.0-SNAPSHOT.jar";
+        Path jar = serverJar(System.getenv(SERVER_JAR_ENV));
 
         List<String> command = new ArrayList<>();
         command.add(javaBin);
         command.add("-jar");
-        command.add(jarPath);
+        command.add(jar.toString());
 
         ProcessBuilder pb = new ProcessBuilder(command);
 
@@ -56,11 +62,35 @@ public class NodeController implements AutoCloseable {
         this.process = pb.start();
     }
 
+    /**
+     * The production server jar: {@code DLSM_SERVER_JAR} when set, otherwise
+     * the jar built in this repository.
+     *
+     * @throws IOException if the jar does not exist, so a missing build fails
+     *                     at once instead of as a readiness timeout
+     */
+    static Path serverJar(String configured) throws IOException {
+        Path jar = Path.of(configured == null || configured.isBlank()
+                ? DEFAULT_SERVER_JAR : configured);
+        if (!Files.isRegularFile(jar)) {
+            throw new IOException("Server jar not found: " + jar.toAbsolutePath()
+                    + " (build it with ./mvnw package or ./dbctl build, or set "
+                    + SERVER_JAR_ENV + ")");
+        }
+        return jar;
+    }
+
     // Nova metoda za čekanje da server bude spreman
     public void awaitReady(long timeoutMs) throws Exception {
-        long deadline = System.currentTimeMillis() + timeoutMs;
+        // Monotonic clock: a wall-clock jump must not stretch or cut the deadline.
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
         URI uri = URI.create("http://localhost:" + adminPort + "/health/ready");
-        while (System.currentTimeMillis() < deadline) {
+        while (System.nanoTime() - deadline < 0) {
+            if (process != null && !process.isAlive()) {
+                // E.g. a taken port or a bad configuration: no point in waiting.
+                throw new IllegalStateException("Node exited with code "
+                        + process.exitValue() + " before it became ready");
+            }
             try {
                 HttpRequest request = HttpRequest.newBuilder().uri(uri).GET().build();
                 HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
