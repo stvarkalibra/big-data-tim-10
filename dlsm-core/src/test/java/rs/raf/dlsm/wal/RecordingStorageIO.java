@@ -22,7 +22,7 @@ import java.util.Locale;
  * <p>Windows cannot open a directory as a file channel, so there the real
  * directory force is skipped and only recorded; Linux runs it for real.
  */
-final class RecordingStorageIO implements StorageIO {
+public final class RecordingStorageIO implements StorageIO {
 
     private static final boolean WINDOWS =
             System.getProperty("os.name").toLowerCase(Locale.ROOT).contains("win");
@@ -32,26 +32,26 @@ final class RecordingStorageIO implements StorageIO {
     private final List<Integer> writeSizes = new ArrayList<>();
     private String failingCall;
 
-    RecordingStorageIO(Failpoints failpoints) {
+    public RecordingStorageIO(Failpoints failpoints) {
         this.delegate = new DefaultStorageIO(failpoints);
     }
 
     /** The next calls named {@code call} (e.g. {@code "force"}) throw before running. */
-    RecordingStorageIO failOn(String call) {
+    public RecordingStorageIO failOn(String call) {
         this.failingCall = call;
         return this;
     }
 
-    List<String> calls() {
+    public List<String> calls() {
         return List.copyOf(calls);
     }
 
     /** Byte count of each {@code writeFully} call, in order. */
-    List<Integer> writeSizes() {
+    public List<Integer> writeSizes() {
         return List.copyOf(writeSizes);
     }
 
-    void clearCalls() {
+    public void clearCalls() {
         calls.clear();
         writeSizes.clear();
     }

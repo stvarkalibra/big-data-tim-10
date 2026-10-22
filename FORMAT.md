@@ -384,18 +384,18 @@ Posle prve inicijalizacije `node.json` se **nikad** ne prepisuje niti ponovo stv
 
 ### 4.3 Odluke pri pokretanju koje zavise od ovih fajlova
 
-Klasifikacija iz CP1 §14.2. „Stabilni podaci“ su `MANIFEST.json`, bilo koji WAL segment u `wal/` ili bilo koja SSTable u `sst/`.
+Klasifikacija iz CP1 §14.2. „Stabilni podaci“ su `MANIFEST.json` ili **bilo koji** unos u `lsm/wal/` ili `lsm/sst/`, i kada ime nije ispravno ime segmenta ili tabele. Fajlovi u `lsm/tmp/` se nikad ne računaju. Klasifikacija se radi pod `LOCK`-om i samo čita; tek posle nje se bilo šta pravi, briše ili popravlja (implementacija: `recovery.StartupClassifier`).
 
 | Zatečeno stanje | Ishod | Kategorija |
 |---|---|---|
 | Brava `LOCK` ne može da se dobije | `FAILED` | `DIRECTORY_LOCKED` |
 | Nema `node.json` i nema stabilnih podataka (direktorijumi smeju da postoje) | prva inicijalizacija od koraka 1 | — |
 | Ispravan i odgovarajući `node.json`, nema manifesta, nema WAL-a ni SSTable | nastavak inicijalizacije od koraka 3 | — |
-| Ispravan `node.json` i prazan manifest generacije 0, nema upotrebljivog WAL-a | dodela i force novog WAL segmenta | — |
+| Ispravan `node.json` i prazan manifest generacije 0, nema upotrebljivog WAL-a | normalan oporavak, koji u koraku 12 dodeljuje i radi force novog WAL segmenta | — |
 | Nema `node.json`, a postoje stabilni podaci | `FAILED` | `NODE_IDENTITY_MISMATCH` |
 | Ispravan `node.json`, nema `MANIFEST.json`, a postoji bilo koji WAL segment ili SSTable | `FAILED` | `MANIFEST_INVALID` |
 | Nedostaje obavezni direktorijum (`lsm/`, `lsm/wal/`, `lsm/sst/`, `lsm/tmp/`), a `node.json` ili manifest već postoji | `FAILED` | `DIRECTORY_LAYOUT` |
-| `node.json` je neispravan (JSON, polja, tipovi, nepodržana verzija) | `FAILED` | `NODE_IDENTITY_MISMATCH` |
+| `node.json` je neispravan (JSON, polja, tipovi, nepodržana verzija) ili nije običan fajl | `FAILED` | `NODE_IDENTITY_MISMATCH` |
 | `nodeId` se razlikuje od konfigurisanog `NODE_ID` | `FAILED` | `NODE_IDENTITY_MISMATCH` |
 
 Zaostali `lsm/tmp/node.json.tmp` nikad ne nadjačava konačni `node.json` i briše se tek posle ove klasifikacije (CP1 §14.2).
