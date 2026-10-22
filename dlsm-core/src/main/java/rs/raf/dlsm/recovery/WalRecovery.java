@@ -1,7 +1,10 @@
 package rs.raf.dlsm.recovery;
 
 import rs.raf.dlsm.common.ErrorCode;
+import rs.raf.dlsm.common.InternalRecord;
 import rs.raf.dlsm.common.StorageException;
+import rs.raf.dlsm.engine.ImmutableMemTable;
+import rs.raf.dlsm.engine.MemTable;
 import rs.raf.dlsm.engine.OpContext;
 import rs.raf.dlsm.failpoint.Failpoints;
 import rs.raf.dlsm.io.StorageIO;
@@ -16,7 +19,9 @@ import java.io.IOException;
 import java.nio.channels.FileChannel;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -32,6 +37,9 @@ import java.util.Optional;
  * (I6, CP1-WAL-008).
  */
 public final class WalRecovery {
+
+    /** Process-local generation of the recovered MemTable (CP1 §14.2). */
+    public static final long RECOVERED_GENERATION = 1;
 
     private final DataLayout layout;
     private final StorageIO io;
@@ -114,5 +122,48 @@ public final class WalRecovery {
         log.info("WAL_TORN_TAIL_TRUNCATED", fields);
 
         return true;
+    }
+
+    /**
+     * Step 10 (and CP1 §21.3): applies every valid record with a sequence
+     * above {@code flushedThroughSequence} to one recovered generation, in
+     * WAL order so the greatest sequence wins, tombstones included. Records
+     * are never appended to the WAL again; each applied one counts once in
+     * {@code walRecordsReplayed}.
+     *
+     * <p>The generation may exceed {@code MEMTABLE_MAX_BYTES}: replay never
+     * drops a valid record. It is frozen with the segments that hold its
+     * records, which protect it until a flush covers it.
+     *
+     * @return the frozen recovered generation, or {@code null} when nothing
+     *         lies above the high-water mark
+     */
+    ImmutableMemTable replay(WalLogScan scan, long flushedThroughSequence, long memtableMaxBytes) {
+        if (flushedThroughSequence < 0) {
+            throw new IllegalArgumentException(
+                    "flushedThroughSequence must not be negative: " + flushedThroughSequence);
+        }
+
+        MemTable recovered = new MemTable(RECOVERED_GENERATION, memtableMaxBytes);
+        List<Long> protectingSegments = new ArrayList<>();
+
+        for (WalScanResult segment : scan.segments()) {
+            boolean replayedFromSegment = false;
+
+            for (WalScanResult.Entry entry : segment.entries()) {
+                InternalRecord record = entry.record();
+                if (record.sequence() > flushedThroughSequence) {
+                    recovered.apply(record);
+                    stats.increment("walRecordsReplayed");
+                    replayedFromSegment = true;
+                }
+            }
+
+            if (replayedFromSegment) {
+                protectingSegments.add(segment.segmentId());
+            }
+        }
+
+        return protectingSegments.isEmpty() ? null : recovered.freeze(protectingSegments);
     }
 }
