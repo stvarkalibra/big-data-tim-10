@@ -9,14 +9,24 @@ import rs.raf.dlsm.io.StorageIO;
 import rs.raf.dlsm.log.JsonLog;
 import rs.raf.dlsm.manifest.Manifest;
 import rs.raf.dlsm.manifest.ManifestManager;
+import rs.raf.dlsm.manifest.TableIdAllocator;
+import rs.raf.dlsm.sstable.SSTableMeta;
 import rs.raf.dlsm.sstable.SSTableRecoveryVerifier;
 import rs.raf.dlsm.sstable.SSTableValidator;
 import rs.raf.dlsm.stats.StorageStats;
 
 import java.io.IOException;
+import java.nio.file.DirectoryStream;
+import java.nio.file.Files;
+import java.nio.file.LinkOption;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
 /**
  * Startup recovery, CP1 §21.1 steps 1–15: prove the directory state from
@@ -99,6 +109,92 @@ public final class RecoveryProcedure implements AutoCloseable {
             throw new StorageException(ErrorCode.STORAGE_IO, category,
                     "Referenced SSTable is invalid: " + e.getMessage(), e);
         }
+    }
+
+    /** What steps 5–6 deleted, by file name. */
+    record Cleanup(List<String> temporaryRemoved, List<String> orphansRemoved) {
+        Cleanup {
+            temporaryRemoved = List.copyOf(temporaryRemoved);
+            orphansRemoved = List.copyOf(orphansRemoved);
+        }
+    }
+
+    /**
+     * Steps 5–6, after the manifest and its tables are proven valid:
+     * <ul>
+     *   <li>every file in {@code lsm/tmp/} is temporary: it is never the
+     *       source of published state, so it is deleted;</li>
+     *   <li>a final table name {@code sst-<id>.sst} in {@code lsm/sst/} that
+     *       the manifest does not reference is an orphan, even with valid
+     *       checksums, and is deleted;</li>
+     *   <li>other names in {@code lsm/sst/} are left alone and logged: recovery
+     *       never deletes a file it cannot classify;</li>
+     *   <li>{@code lsm/wal/} is not touched here: a segment's coverage is known
+     *       only after it is scanned (steps 7–13).</li>
+     * </ul>
+     * Each deleted directory entry is then made durable with a force of its
+     * directory. The WAL and table ID allocators must be built before this
+     * runs, so IDs of deleted leftovers stay reserved (CP1 §16.1, §18.3).
+     * Repeating it after a crash midway deletes the rest, with the same result.
+     */
+    Cleanup removeTemporaryAndOrphanFiles(Manifest manifest, OpContext ctx) throws IOException {
+        Set<String> referenced = new HashSet<>();
+        for (SSTableMeta table : manifest.sstables()) {
+            referenced.add(table.file());
+        }
+
+        List<String> temporary = new ArrayList<>();
+        for (Path file : regularFiles(layout.tmpDir())) {
+            io.delete(file);
+            stats.increment("temporaryFilesRemoved");
+            temporary.add(file.getFileName().toString());
+        }
+
+        List<String> orphans = new ArrayList<>();
+        for (Path file : regularFiles(layout.sstDir())) {
+            String name = file.getFileName().toString();
+            if (referenced.contains(name)) {
+                continue;
+            }
+            if (TableIdAllocator.parseTableId(name).isPresent()) {
+                io.delete(file);
+                stats.increment("orphanFilesRemoved");
+                orphans.add(name);
+            } else {
+                Map<String, Object> fields = new LinkedHashMap<>();
+                fields.put("message", "Unrecognized file left in lsm/sst: " + name);
+                log.warn("RECOVERY_UNKNOWN_FILE", fields);
+            }
+        }
+
+        if (!temporary.isEmpty()) {
+            io.fsyncDirectory(layout.tmpDir(), null, ctx);
+        }
+        if (!orphans.isEmpty()) {
+            io.fsyncDirectory(layout.sstDir(), null, ctx);
+        }
+        if (!temporary.isEmpty() || !orphans.isEmpty()) {
+            Map<String, Object> fields = new LinkedHashMap<>();
+            fields.put("manifestGeneration", manifest.generation());
+            fields.put("message", "Removed temporary files " + temporary + " and orphan tables " + orphans);
+            log.info("RECOVERY_CLEANUP", fields);
+        }
+
+        return new Cleanup(temporary, orphans);
+    }
+
+    /** Regular files directly in {@code dir}, sorted by name for a stable order. */
+    private static List<Path> regularFiles(Path dir) throws IOException {
+        List<Path> files = new ArrayList<>();
+        try (DirectoryStream<Path> stream = Files.newDirectoryStream(dir)) {
+            for (Path file : stream) {
+                if (Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) {
+                    files.add(file);
+                }
+            }
+        }
+        files.sort(null);
+        return files;
     }
 
     /** The manifest module, loaded by recovery; maintenance publishes through it. */
