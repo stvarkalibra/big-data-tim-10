@@ -10,8 +10,10 @@ import java.net.http.HttpResponse;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 
 public class NodeController implements AutoCloseable {
@@ -25,6 +27,8 @@ public class NodeController implements AutoCloseable {
     private final int port;
     private final int adminPort;
     private final HttpClient client = HttpClient.newHttpClient();
+    /** Extra server configuration for every start; the ports, directory and test mode stay ours. */
+    private final Map<String, String> environment = new LinkedHashMap<>();
 
     public NodeController(Path dataDir, int port, int adminPort) {
         this.dataDir = dataDir;
@@ -37,6 +41,15 @@ public class NodeController implements AutoCloseable {
         NodeController controller = new NodeController(tempDir, port, adminPort);
         controller.start(true);
         return controller;
+    }
+
+    /**
+     * Sets a server environment variable for every later start, e.g.
+     * {@code MEMTABLE_MAX_BYTES} for a scenario that needs tiny generations.
+     */
+    public NodeController withEnvironment(String name, String value) {
+        environment.put(Objects.requireNonNull(name, "name"), Objects.requireNonNull(value, "value"));
+        return this;
     }
 
     public void start(boolean testMode) throws IOException {
@@ -52,6 +65,7 @@ public class NodeController implements AutoCloseable {
         ProcessBuilder pb = new ProcessBuilder(command);
 
         Map<String, String> env = pb.environment();
+        env.putAll(environment);
         env.put("DLSM_PUBLIC_PORT", String.valueOf(port));
         env.put("DLSM_ADMIN_PORT", String.valueOf(adminPort));
         env.put("DLSM_DATA_DIR", dataDir.toAbsolutePath().toString());
