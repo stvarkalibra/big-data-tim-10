@@ -13,6 +13,7 @@ import rs.raf.dlsm.engine.RecoveredState;
 import rs.raf.dlsm.failpoint.NoOpFailpoints;
 import rs.raf.dlsm.io.DefaultStorageIO;
 import rs.raf.dlsm.log.JsonLog;
+import rs.raf.dlsm.maintenance.CompactionJob;
 import rs.raf.dlsm.maintenance.FlushJob;
 import rs.raf.dlsm.maintenance.MaintenanceProgress;
 import rs.raf.dlsm.maintenance.MaintenanceWorker;
@@ -66,12 +67,13 @@ class MaintenanceRoutesTest {
         JsonLog log = new JsonLog("test",
                 new PrintStream(new ByteArrayOutputStream(), true, StandardCharsets.UTF_8), Clock.systemUTC());
 
+        MaintenanceProgress progress = new MaintenanceProgress();
         InMemoryWal wal = new InMemoryWal();
         engine = Engine.open(new EngineConfig(EngineConfig.DEFAULT_MEMTABLE_MAX_BYTES, failpoints),
                 new RecoveredState(0, null, List.of(), wal.createSegment(ctx()), wal),
                 host -> worker = new MaintenanceWorker(host, manifests,
-                        new FlushJob(layout, io, failpoints, stats, manifests, tableIds, host,
-                                new MaintenanceProgress()), log));
+                        new FlushJob(layout, io, failpoints, stats, manifests, tableIds, host, progress),
+                        new CompactionJob(layout, io, failpoints, stats, manifests, tableIds, host, progress), log));
     }
 
     private Router router() {
