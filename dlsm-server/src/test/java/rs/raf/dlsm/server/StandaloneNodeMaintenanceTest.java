@@ -97,12 +97,36 @@ class StandaloneNodeMaintenanceTest {
     }
 
     @Test
-    void compactIsNotReadyWhileNodeHasNoMaintenanceWorker() throws Exception {
+    void emptyNodeCompactionIsANoOp() throws Exception {
         HttpResponse<String> response = post(node.adminPort(), "/admin/v1/storage/compact", "{}");
 
-        assertEquals(503, response.statusCode(), response.body());
-        assertEquals("NODE_NOT_READY", MAPPER.readTree(response.body()).get("code").asText());
+        assertEquals(200, response.statusCode(), response.body());
+        JsonNode body = MAPPER.readTree(response.body());
+        assertEquals("NO_OP", body.get("result").asText());
+        assertEquals(0, body.get("inputTableIds").size());
+        assertTrue(body.get("outputTableId").isNull());
         assertEquals(404, post(node.publicPort(), "/admin/v1/storage/compact", null).statusCode());
+    }
+
+    @Test
+    void compactionReplacesTwoFlushedTables() throws Exception {
+        put("alpha");
+        assertEquals(200, post(node.adminPort(), "/admin/v1/storage/flush", null).statusCode());
+        put("beta");
+        assertEquals(200, post(node.adminPort(), "/admin/v1/storage/flush", null).statusCode());
+
+        HttpResponse<String> response = post(node.adminPort(), "/admin/v1/storage/compact", null);
+
+        assertEquals(200, response.statusCode(), response.body());
+        JsonNode body = MAPPER.readTree(response.body());
+        assertEquals("PUBLISHED", body.get("result").asText());
+        assertEquals(2, body.get("inputTableIds").size());
+        long output = body.get("outputTableId").asLong();
+        Path sst = new DataLayout(dataDir).sstDir();
+        assertTrue(Files.isRegularFile(sst.resolve(SSTableMeta.fileName(output))));
+        for (JsonNode input : body.get("inputTableIds")) {
+            assertFalse(Files.exists(sst.resolve(SSTableMeta.fileName(input.asLong()))));
+        }
     }
 
     @Test
