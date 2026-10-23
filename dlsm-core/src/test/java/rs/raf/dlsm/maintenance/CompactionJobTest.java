@@ -257,6 +257,42 @@ class CompactionJobTest {
     }
 
     @Test
+    void corruptInputFailsEngineWithItsCategoryAndPublishesNothing() throws Exception {
+        specExampleTables();
+        Path first = layout.sstDir().resolve(SSTableMeta.fileName(1));
+        byte[] content = Files.readAllBytes(first);
+        content[16 + 24] ^= 0x01;
+        Files.write(first, content);
+
+        StorageException e = assertThrows(StorageException.class,
+                () -> job.compact(CompactionJob.MANUAL_MINIMUM_INPUTS, ctx()));
+
+        assertEquals("DATA_BLOCK", e.category());
+        assertEquals(Lifecycle.FAILED, engine.lifecycle());
+        assertSame(e, engine.lastFatalError().orElseThrow());
+        assertEquals(2, diskManifest().generation());
+        assertEquals(List.of(1L, 2L), diskManifest().sstables().stream().map(SSTableMeta::tableId).toList());
+        assertEquals(List.of(SSTableMeta.fileName(1), SSTableMeta.fileName(2)), files(layout.sstDir()));
+        assertTrue(files(layout.tmpDir()).isEmpty());
+        assertEquals(1, stats.compactionAttempts.get());
+        assertEquals(0, stats.compactionPublications.get());
+        assertEquals("IDLE", progress.snapshot().phase());
+    }
+
+    @Test
+    void ioErrorWritingOutputIsNotFatal() throws Exception {
+        specExampleTables();
+        Map<String, String> before = answers();
+        arm(FailpointNames.SSTABLE_AFTER_SYNC_BEFORE_RENAME, Action.IO_ERROR);
+
+        assertThrows(StorageException.class, () -> job.compact(CompactionJob.MANUAL_MINIMUM_INPUTS, ctx()));
+
+        assertInputsKept(before);
+        assertTrue(engine.lastFatalError().isEmpty());
+        assertRetrySucceeds(before);
+    }
+
+    @Test
     void ioErrorAfterSelectionKeepsInputs() throws Exception {
         specExampleTables();
         Map<String, String> before = answers();
