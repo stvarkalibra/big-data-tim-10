@@ -6,12 +6,22 @@ import rs.raf.dlsm.common.StorageException;
 import rs.raf.dlsm.common.UncheckedStorageException;
 import rs.raf.dlsm.engine.Engine;
 import rs.raf.dlsm.engine.EngineConfig;
+import rs.raf.dlsm.engine.FlushScheduler;
+import rs.raf.dlsm.engine.MaintenanceHost;
+import rs.raf.dlsm.engine.OpContext;
 import rs.raf.dlsm.engine.StorageEngine;
 import rs.raf.dlsm.failpoint.FailpointRegistry;
 import rs.raf.dlsm.failpoint.Failpoints;
 import rs.raf.dlsm.failpoint.NoOpFailpoints;
+import rs.raf.dlsm.io.DefaultStorageIO;
+import rs.raf.dlsm.io.StorageIO;
 import rs.raf.dlsm.log.JsonLog;
+import rs.raf.dlsm.maintenance.FlushJob;
+import rs.raf.dlsm.maintenance.MaintenanceProgress;
 import rs.raf.dlsm.maintenance.MaintenanceWorker;
+import rs.raf.dlsm.recovery.DataLayout;
+import rs.raf.dlsm.recovery.RecoveryProcedure;
+import rs.raf.dlsm.recovery.RecoveryResult;
 import rs.raf.dlsm.server.http.FailpointRoutes;
 import rs.raf.dlsm.server.http.HealthRoutes;
 import rs.raf.dlsm.server.http.HttpServerHost;
@@ -22,17 +32,23 @@ import rs.raf.dlsm.server.http.StorageStatusRoutes;
 import rs.raf.dlsm.stats.StorageStats;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.function.Function;
 
 /**
  * One standalone process: the admin server on 8082, the storage engine and
  * the public API on 8080, started in that order. The admin server comes
  * first, so liveness answers while the engine is still opening or
  * recovering (PI §20.1); readiness follows the engine's lifecycle.
+ *
+ * <p>The engine opens through startup recovery over {@code DLSM_DATA_DIR}
+ * (CP1 §21.1), with the flush worker as its maintenance. The node holds the
+ * directory lock until it closes.
  */
 public final class StandaloneNode implements AutoCloseable {
 
@@ -42,16 +58,23 @@ public final class StandaloneNode implements AutoCloseable {
     private final StorageStats stats = new StorageStats();
     /** Present only with {@code TEST_MODE=true} (PI §16.6, §21). */
     private final FailpointRegistry failpointRegistry;
+    private final DataLayout layout;
+    private final StorageIO io;
+    private final RecoveryProcedure recovery;
     private volatile StorageEngine engine;
     private volatile MaintenanceWorker maintenance;
     private volatile NodeStatus status;
     private volatile boolean stopping;
 
-    private StandaloneNode(ServerConfig config, JsonLog log) throws IOException {
+    private StandaloneNode(ServerConfig config, JsonLog log,
+                           Function<Failpoints, StorageIO> storage) throws IOException {
         // Failpoints exist only in test mode; otherwise every hit is a no-op.
         failpointRegistry = config.testMode() ? new FailpointRegistry(true) : null;
         Failpoints failpoints = failpointRegistry != null
                 ? failpointRegistry : new NoOpFailpoints();
+        layout = new DataLayout(config.dataDir());
+        io = storage.apply(failpoints);
+        recovery = new RecoveryProcedure(layout, config.nodeId(), io, failpoints, stats, log);
 
         Router admin = new Router();
         HealthRoutes.register(admin, config.nodeId(), this::lifecycle);
@@ -74,10 +97,8 @@ public final class StandaloneNode implements AutoCloseable {
                 new InetSocketAddress(config.adminPort()), admin, log);
         adminHost.start();
         try {
-            // TODO(recovery): open the durable engine over the data directory;
-            // until then the node keeps data in memory only (milestone M1).
-            Engine opened = Engine.openInMemory(
-                    new EngineConfig(config.memtableMaxBytes(), failpoints));
+            Engine opened = openEngine(
+                    new EngineConfig(config.memtableMaxBytes(), failpoints), failpoints, log);
             engine = opened;
             status = new NodeStatus(config.nodeId(), opened, stats);
 
@@ -91,16 +112,57 @@ public final class StandaloneNode implements AutoCloseable {
             if (engine != null) {
                 engine.close();
             }
+            try {
+                recovery.close();
+            } catch (IOException unlockFailure) {
+                e.addSuppressed(unlockFailure);
+            }
             throw e;
         }
     }
 
+    /**
+     * CP1 §21.1 steps 1–15 over the data directory. The maintenance worker
+     * continues from what recovery proved: the loaded manifest and the
+     * table ID allocator built before cleanup (CP1 §18.3).
+     */
+    private Engine openEngine(EngineConfig engineConfig, Failpoints failpoints, JsonLog log)
+            throws IOException {
+        try {
+            return recovery.openEngine(engineConfig,
+                    (host, recovered) -> startMaintenance(host, recovered, failpoints, log),
+                    OpContext.background());
+        } catch (StorageException e) {
+            // TODO(durable-node): stay alive as FAILED instead (CP1 §21.4).
+            throw new IOException("Recovery failed: " + e.getMessage(), e);
+        }
+    }
+
+    private FlushScheduler startMaintenance(MaintenanceHost host, RecoveryResult recovered,
+                                            Failpoints failpoints, JsonLog log) {
+        FlushJob flush = new FlushJob(layout, io, failpoints, stats, recovery.manifests(),
+                recovered.tableIds(), host, new MaintenanceProgress());
+        MaintenanceWorker worker = new MaintenanceWorker(host, recovery.manifests(), flush, log);
+        maintenance = worker;
+        return worker;
+    }
+
     public static StandaloneNode start(ServerConfig config, JsonLog log)
             throws IOException {
+        return start(config, log, DefaultStorageIO::new);
+    }
+
+    /**
+     * With another {@link StorageIO}: tests on Windows, where a directory
+     * cannot be forced, replace only that call.
+     */
+    static StandaloneNode start(ServerConfig config, JsonLog log,
+                                Function<Failpoints, StorageIO> storage) throws IOException {
         Objects.requireNonNull(config, "config");
         Objects.requireNonNull(log, "log");
+        Objects.requireNonNull(storage, "storage");
 
-        StandaloneNode node = new StandaloneNode(config, log);
+        StandaloneNode node = new StandaloneNode(config, log, storage);
 
         Map<String, Object> fields = new LinkedHashMap<>();
         fields.put("lifecycleState", node.lifecycle().name());
@@ -153,6 +215,10 @@ public final class StandaloneNode implements AutoCloseable {
         return adminHost.port();
     }
 
+    /**
+     * Stops serving and releases the directory lock. Durability never
+     * depends on this (CP1 §3); it lets tests restart over the same directory.
+     */
     @Override
     public void close() {
         stopping = true;
@@ -163,5 +229,10 @@ public final class StandaloneNode implements AutoCloseable {
         publicHost.close();
         adminHost.close();
         engine.close();
+        try {
+            recovery.close();
+        } catch (IOException e) {
+            throw new UncheckedIOException("Could not release the data directory lock", e);
+        }
     }
 }

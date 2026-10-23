@@ -3,6 +3,7 @@ package rs.raf.dlsm.server;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import rs.raf.dlsm.failpoint.FailpointNames;
 import rs.raf.dlsm.failpoint.FailpointRegistry;
 import rs.raf.dlsm.log.JsonLog;
@@ -14,6 +15,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.time.Clock;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -29,6 +31,9 @@ class StandaloneNodeFailpointsTest {
     private final HttpClient client = HttpClient.newHttpClient();
     private StandaloneNode node;
 
+    @TempDir
+    Path dataDir;
+
     @AfterEach
     void stop() {
         if (node != null) {
@@ -40,7 +45,9 @@ class StandaloneNodeFailpointsTest {
         JsonLog log = new JsonLog("standalone",
                 new PrintStream(new ByteArrayOutputStream(), true, StandardCharsets.UTF_8),
                 Clock.systemUTC());
-        node = StandaloneNode.start(ServerConfig.onPorts(0, 0).withTestMode(testMode), log);
+        node = StandaloneNode.start(
+                ServerConfig.onPorts(0, 0).withTestMode(testMode).withDataDir(dataDir), log,
+                WindowsSafeStorageIO::new);
     }
 
     private HttpResponse<String> put(String key) throws Exception {
