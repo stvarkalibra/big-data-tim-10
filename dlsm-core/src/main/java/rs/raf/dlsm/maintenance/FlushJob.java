@@ -59,6 +59,10 @@ public final class FlushJob {
         this.progress = Objects.requireNonNull(progress, "progress");
     }
 
+    MaintenanceProgress progress() {
+        return progress;
+    }
+
     public Optional<Outcome> flushOldest(Long targetSequence, OpContext ctx) throws StorageException {
         Objects.requireNonNull(ctx, "ctx");
         Optional<FlushInput> next = host.oldestImmutable();

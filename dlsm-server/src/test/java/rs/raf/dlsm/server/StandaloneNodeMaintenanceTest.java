@@ -6,6 +6,8 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import rs.raf.dlsm.failpoint.FailpointNames;
+import rs.raf.dlsm.failpoint.FailpointRegistry;
 import rs.raf.dlsm.log.JsonLog;
 import rs.raf.dlsm.recovery.DataLayout;
 import rs.raf.dlsm.sstable.SSTableMeta;
@@ -20,6 +22,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -39,13 +42,98 @@ class StandaloneNodeMaintenanceTest {
                 new PrintStream(new ByteArrayOutputStream(), true, StandardCharsets.UTF_8),
                 Clock.systemUTC());
         node = StandaloneNode.start(
-                new ServerConfig("standalone", 0, 0, 1 << 20).withDataDir(dataDir), log,
+                new ServerConfig("standalone", 0, 0, 1 << 20).withTestMode(true).withDataDir(dataDir), log,
                 WindowsSafeStorageIO::new);
     }
 
     @AfterEach
     void stop() {
+        if (node != null) {
+            node.close();
+        }
+    }
+
+    private JsonNode status() throws Exception {
+        HttpResponse<String> response = client.send(HttpRequest.newBuilder(
+                        URI.create("http://127.0.0.1:" + node.adminPort() + "/admin/v1/storage/status"))
+                        .header("X-Request-Id", "status-1")
+                        .GET()
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, response.statusCode(), response.body());
+        return MAPPER.readTree(response.body());
+    }
+
+    private void restart() throws Exception {
         node.close();
+        node = null;
+        start();
+    }
+
+    @Test
+    void failedMaintenanceShowsInStatusWhileNodeStaysReady() throws Exception {
+        assertTrue(status().get("maintenance").get("lastError").isNull());
+        node.failpointRegistry().orElseThrow().addRule(new FailpointRegistry.Rule("tok-manifest",
+                FailpointNames.MANIFEST_AFTER_TEMP_SYNC_BEFORE_RENAME, FailpointRegistry.Action.IO_ERROR,
+                0, 1, 0, Map.of()));
+        put("alpha");
+
+        HttpResponse<String> failed = post(node.adminPort(), "/admin/v1/storage/flush", null);
+
+        assertEquals(500, failed.statusCode(), failed.body());
+        JsonNode s = status();
+        assertEquals("READY", s.get("lifecycle").asText());
+        assertTrue(s.get("lastFatalError").isNull());
+        JsonNode lastError = s.get("maintenance").get("lastError");
+        assertEquals("STORAGE_IO", lastError.get("code").asText());
+        assertFalse(lastError.get("message").asText().isEmpty());
+
+        JsonNode settled = awaitIdleWithGeneration(1);
+        assertEquals(lastError, settled.get("maintenance").get("lastError"));
+    }
+
+    private JsonNode awaitIdleWithGeneration(long generation) throws Exception {
+        long deadline = System.nanoTime() + 10_000_000_000L;
+        JsonNode s = status();
+        while (!("IDLE".equals(s.get("maintenance").get("phase").asText())
+                && s.get("manifest").get("generation").asLong() == generation)
+                && System.nanoTime() < deadline) {
+            Thread.onSpinWait();
+            s = status();
+        }
+        assertEquals("IDLE", s.get("maintenance").get("phase").asText(), s.toString());
+        assertEquals(generation, s.get("manifest").get("generation").asLong(), s.toString());
+        return s;
+    }
+
+    @Test
+    void statusReportsTheRealManifestAcrossRestart() throws Exception {
+        JsonNode fresh = status();
+        assertEquals(0, fresh.get("manifest").get("generation").asLong());
+        assertEquals("NONE", fresh.get("maintenance").get("operation").asText());
+        assertEquals("IDLE", fresh.get("maintenance").get("phase").asText());
+
+        put("alpha");
+        post(node.adminPort(), "/admin/v1/storage/flush", null);
+        put("beta");
+        post(node.adminPort(), "/admin/v1/storage/flush", null);
+        post(node.adminPort(), "/admin/v1/storage/compact", null);
+
+        JsonNode compacted = status();
+        JsonNode manifest = compacted.get("manifest");
+        assertEquals(3, manifest.get("generation").asLong());
+        assertEquals(4, manifest.get("nextTableId").asLong());
+        assertEquals(2, manifest.get("flushedThroughSequence").asLong());
+        assertEquals(1, manifest.get("sstableCount").asInt());
+        assertEquals(compacted.get("sstables").size(), manifest.get("sstableCount").asInt());
+        assertEquals(3, compacted.get("sstables").get(0).get("tableId").asLong());
+        assertEquals("IDLE", compacted.get("maintenance").get("phase").asText());
+
+        restart();
+
+        JsonNode recovered = status();
+        assertEquals(manifest, recovered.get("manifest"));
+        assertEquals(compacted.get("sstables"), recovered.get("sstables"));
     }
 
     private HttpResponse<String> post(int port, String path, String body) throws Exception {

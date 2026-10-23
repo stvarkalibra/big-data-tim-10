@@ -134,7 +134,8 @@ public final class StatusBuilder {
             String operation,
             String phase,
             Long targetSequence,
-            List<Long> inputTableIds
+            List<Long> inputTableIds,
+            FatalError lastError
     ) {
         public Maintenance {
             if (!OPERATIONS.contains(operation) ||
@@ -143,6 +144,14 @@ public final class StatusBuilder {
                 throw new IllegalArgumentException("Invalid maintenance");
             }
             inputTableIds = List.copyOf(inputTableIds);
+        }
+
+        public Maintenance(
+                String operation,
+                String phase,
+                Long targetSequence,
+                List<Long> inputTableIds) {
+            this(operation, phase, targetSequence, inputTableIds, null);
         }
     }
 
@@ -296,6 +305,10 @@ public final class StatusBuilder {
         List<Long> inputIds = new ArrayList<>(job.inputTableIds());
         inputIds.sort(Long::compareTo);
         maintenance.put("inputTableIds", inputIds);
+        FatalError lastError = job.lastError();
+        maintenance.put("lastError", lastError == null ? null :
+                Map.of("code", lastError.code(),
+                        "message", lastError.message()));
         result.put("maintenance", maintenance);
 
         Map<String, Object> counters = map();

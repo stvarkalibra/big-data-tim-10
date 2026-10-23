@@ -1,5 +1,6 @@
 package rs.raf.dlsm.maintenance;
 
+import rs.raf.dlsm.common.StorageException;
 import rs.raf.dlsm.stats.StatusBuilder;
 
 import java.util.List;
@@ -17,6 +18,7 @@ public final class MaintenanceProgress {
             new StatusBuilder.Maintenance(Operation.NONE.name(), Phase.IDLE.name(), null, List.of());
 
     private volatile StatusBuilder.Maintenance current = IDLE;
+    private volatile StatusBuilder.FatalError lastError;
 
     public synchronized void begin(Operation operation, Long targetSequence, List<Long> inputTableIds) {
         Objects.requireNonNull(operation, "operation");
@@ -50,7 +52,15 @@ public final class MaintenanceProgress {
         current = IDLE;
     }
 
-    public StatusBuilder.Maintenance snapshot() {
-        return current;
+    public synchronized void failed(StorageException error) {
+        Objects.requireNonNull(error, "error");
+        String code = error.category() != null ? error.category() : error.code().name();
+        lastError = new StatusBuilder.FatalError(code, error.getMessage());
+    }
+
+    public synchronized StatusBuilder.Maintenance snapshot() {
+        StatusBuilder.Maintenance job = current;
+        return new StatusBuilder.Maintenance(job.operation(), job.phase(),
+                job.targetSequence(), job.inputTableIds(), lastError);
     }
 }
