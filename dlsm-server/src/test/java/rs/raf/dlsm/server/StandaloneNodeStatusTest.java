@@ -5,6 +5,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import rs.raf.dlsm.failpoint.FailpointNames;
+import rs.raf.dlsm.failpoint.FailpointRegistry;
 import rs.raf.dlsm.log.JsonLog;
 
 import java.io.ByteArrayOutputStream;
@@ -17,7 +19,10 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.util.Base64;
+import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.function.BooleanSupplier;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -34,12 +39,23 @@ class StandaloneNodeStatusTest {
     Path dataDir;
 
     private void start(long memtableMaxBytes) throws Exception {
+        start(new ServerConfig("standalone", 0, 0, memtableMaxBytes).withDataDir(dataDir));
+    }
+
+    private void start(ServerConfig config) throws Exception {
         JsonLog log = new JsonLog("standalone",
                 new PrintStream(new ByteArrayOutputStream(), true, StandardCharsets.UTF_8),
                 Clock.systemUTC());
-        node = StandaloneNode.start(
-                new ServerConfig("standalone", 0, 0, memtableMaxBytes).withDataDir(dataDir), log,
-                WindowsSafeStorageIO::new);
+        node = StandaloneNode.start(config, log, WindowsSafeStorageIO::new);
+    }
+
+    /** Bounded polling of visible state; the condition is the proof. */
+    private static void awaitTrue(BooleanSupplier condition, String what) {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (!condition.getAsBoolean()) {
+            assertTrue(System.nanoTime() - deadline < 0, what);
+            Thread.onSpinWait();
+        }
     }
 
     @AfterEach
@@ -160,5 +176,61 @@ class StandaloneNodeStatusTest {
 
         assertEquals(404, send(node.publicPort(), "GET", "/admin/v1/storage/status", null)
                 .statusCode());
+    }
+
+    @Test
+    void manifestSectionIsThePublishedManifest() throws Exception {
+        start(1 << 20);
+        put("alpha", "A");
+        put("beta", "B");
+
+        JsonNode flush = admin("POST", "/admin/v1/storage/flush");
+        assertEquals("PUBLISHED", flush.get("result").asText());
+        long tableId = flush.get("publishedTableIds").get(0).asLong();
+
+        JsonNode manifest = admin("GET", "/admin/v1/storage/status").get("manifest");
+        assertEquals(flush.get("manifestGeneration").asLong(), manifest.get("generation").asLong());
+        assertEquals(1, manifest.get("generation").asLong(), "one publication after the initial one");
+        assertEquals(2, manifest.get("flushedThroughSequence").asLong());
+        assertEquals(tableId + 1, manifest.get("nextTableId").asLong());
+        assertEquals(1, manifest.get("sstableCount").asInt());
+
+        // A flush with nothing new publishes nothing: the generation stays (CP1-FLS-001).
+        assertEquals("NO_OP", admin("POST", "/admin/v1/storage/flush").get("result").asText());
+        assertEquals(1, admin("GET", "/admin/v1/storage/status")
+                .get("manifest").get("generation").asLong());
+    }
+
+    @Test
+    void maintenanceSectionShowsTheRunningFlush() throws Exception {
+        start(new ServerConfig("standalone", 0, 0, 1 << 20).withDataDir(dataDir)
+                .withTestMode(true));
+        FailpointRegistry failpoints = node.failpointRegistry().orElseThrow();
+        failpoints.addRule(new FailpointRegistry.Rule("pause-write",
+                FailpointNames.SSTABLE_AFTER_WRITE_BEFORE_SYNC,
+                FailpointRegistry.Action.PAUSE, 0, 1, 30_000, Map.of()));
+        put("alpha", "A");
+
+        CompletableFuture<HttpResponse<String>> flush = CompletableFuture.supplyAsync(() -> {
+            try {
+                return send(node.adminPort(), "POST", "/admin/v1/storage/flush", null);
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+        });
+        awaitTrue(() -> failpoints.stateOf("pause-write") == FailpointRegistry.State.TRIGGERED,
+                "the flush never reached the SSTable write");
+
+        // The output is written, not yet synced: the flush is in its write phase.
+        JsonNode running = admin("GET", "/admin/v1/storage/status").get("maintenance");
+        assertEquals("FLUSH", running.get("operation").asText());
+        assertEquals("WRITE_OUTPUT", running.get("phase").asText());
+        assertEquals(1, running.get("targetSequence").asLong());
+
+        assertTrue(failpoints.releaseRule("pause-write"));
+        assertEquals(200, flush.get(5, TimeUnit.SECONDS).statusCode());
+        JsonNode idle = admin("GET", "/admin/v1/storage/status").get("maintenance");
+        assertEquals("NONE", idle.get("operation").asText());
+        assertEquals("IDLE", idle.get("phase").asText());
     }
 }
