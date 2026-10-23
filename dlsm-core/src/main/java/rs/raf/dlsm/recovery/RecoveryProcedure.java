@@ -1,5 +1,6 @@
 package rs.raf.dlsm.recovery;
 
+import rs.raf.dlsm.common.ErrorCode;
 import rs.raf.dlsm.common.StorageException;
 import rs.raf.dlsm.engine.OpContext;
 import rs.raf.dlsm.failpoint.FailpointNames;
@@ -8,6 +9,8 @@ import rs.raf.dlsm.io.StorageIO;
 import rs.raf.dlsm.log.JsonLog;
 import rs.raf.dlsm.manifest.Manifest;
 import rs.raf.dlsm.manifest.ManifestManager;
+import rs.raf.dlsm.sstable.SSTableRecoveryVerifier;
+import rs.raf.dlsm.sstable.SSTableValidator;
 import rs.raf.dlsm.stats.StorageStats;
 
 import java.io.IOException;
@@ -69,6 +72,33 @@ public final class RecoveryProcedure implements AutoCloseable {
 
         failpoints.hit(FailpointNames.RECOVERY_AFTER_MANIFEST_LOAD, ctx);
         return manifest;
+    }
+
+    /**
+     * Step 4: streams through every table the manifest references and checks
+     * identity, every block and checksum, key order, index, Bloom filter,
+     * footer and agreement with the manifest (Kimi's
+     * {@code SSTableRecoveryVerifier}). Runs before any cleanup, so a bad
+     * authoritative source never decides what gets deleted. Corruption is
+     * never treated as absence (I7, CP1-SST-006).
+     *
+     * @throws StorageException with the SSTable category, e.g. {@code DATA_BLOCK}
+     */
+    void validateTables(Manifest manifest) throws StorageException {
+        try {
+            SSTableRecoveryVerifier.verifyAll(layout.sstDir(), manifest.sstables());
+        } catch (SSTableValidator.ValidationException e) {
+            String category = e.category().name();
+
+            Map<String, Object> fields = new LinkedHashMap<>();
+            fields.put("manifestGeneration", manifest.generation());
+            fields.put("corruptionCategory", category);
+            fields.put("message", e.getMessage());
+            log.error("RECOVERY_SSTABLE_INVALID", fields);
+
+            throw new StorageException(ErrorCode.STORAGE_IO, category,
+                    "Referenced SSTable is invalid: " + e.getMessage(), e);
+        }
     }
 
     /** The manifest module, loaded by recovery; maintenance publishes through it. */
