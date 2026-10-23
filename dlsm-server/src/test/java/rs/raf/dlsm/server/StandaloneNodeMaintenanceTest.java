@@ -45,7 +45,56 @@ class StandaloneNodeMaintenanceTest {
 
     @AfterEach
     void stop() {
+        if (node != null) {
+            node.close();
+        }
+    }
+
+    private JsonNode status() throws Exception {
+        HttpResponse<String> response = client.send(HttpRequest.newBuilder(
+                        URI.create("http://127.0.0.1:" + node.adminPort() + "/admin/v1/storage/status"))
+                        .header("X-Request-Id", "status-1")
+                        .GET()
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, response.statusCode(), response.body());
+        return MAPPER.readTree(response.body());
+    }
+
+    private void restart() throws Exception {
         node.close();
+        node = null;
+        start();
+    }
+
+    @Test
+    void statusReportsTheRealManifestAcrossRestart() throws Exception {
+        JsonNode fresh = status();
+        assertEquals(0, fresh.get("manifest").get("generation").asLong());
+        assertEquals("NONE", fresh.get("maintenance").get("operation").asText());
+        assertEquals("IDLE", fresh.get("maintenance").get("phase").asText());
+
+        put("alpha");
+        post(node.adminPort(), "/admin/v1/storage/flush", null);
+        put("beta");
+        post(node.adminPort(), "/admin/v1/storage/flush", null);
+        post(node.adminPort(), "/admin/v1/storage/compact", null);
+
+        JsonNode compacted = status();
+        JsonNode manifest = compacted.get("manifest");
+        assertEquals(3, manifest.get("generation").asLong());
+        assertEquals(4, manifest.get("nextTableId").asLong());
+        assertEquals(2, manifest.get("flushedThroughSequence").asLong());
+        assertEquals(1, manifest.get("sstableCount").asInt());
+        assertEquals(compacted.get("sstables").size(), manifest.get("sstableCount").asInt());
+        assertEquals(3, compacted.get("sstables").get(0).get("tableId").asLong());
+        assertEquals("IDLE", compacted.get("maintenance").get("phase").asText());
+
+        restart();
+
+        JsonNode recovered = status();
+        assertEquals(manifest, recovered.get("manifest"));
+        assertEquals(compacted.get("sstables"), recovered.get("sstables"));
     }
 
     private HttpResponse<String> post(int port, String path, String body) throws Exception {

@@ -5,13 +5,14 @@ import rs.raf.dlsm.common.UncheckedStorageException;
 import rs.raf.dlsm.engine.Engine;
 import rs.raf.dlsm.engine.EngineStatus;
 import rs.raf.dlsm.engine.OpContext;
-import rs.raf.dlsm.sstable.SSTableMeta;
+import rs.raf.dlsm.manifest.Manifest;
 import rs.raf.dlsm.stats.StatusBuilder;
 import rs.raf.dlsm.stats.StorageStats;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.function.Supplier;
 
 /**
  * Feeds the storage status routes of the standalone node (CP1 §24).
@@ -22,33 +23,50 @@ import java.util.Objects;
  * for the current request thread; {@link #acceptedSequence()} and
  * {@link #durableSequence()} then read the same snapshot.
  *
- * <p>Parts owned by modules that do not exist yet are derived from the
- * engine and marked as such: WAL segments come from the engine's segment
- * ids (sizes unknown in memory), the manifest from the published tables,
- * and maintenance is always idle. Replace them as those modules land.
+ * <p>WAL segments are still derived from the engine's segment ids (sizes
+ * unknown in memory); replace them when the WAL module reports real
+ * segments. The manifest and maintenance parts come from their modules.
  */
 final class NodeStatus {
 
     /** Bounds the wait for the engine read lock; status has no request deadline. */
     private static final long STATUS_TIMEOUT_MS = 5000;
+    private static final int CONSISTENT_READ_ATTEMPTS = 3;
 
     private final String nodeId;
     private final Engine engine;
     private final StorageStats stats;
+    private final Supplier<Manifest> manifests;
+    private final Supplier<StatusBuilder.Maintenance> maintenance;
     private final ThreadLocal<EngineStatus> taken = new ThreadLocal<>();
 
-    NodeStatus(String nodeId, Engine engine, StorageStats stats) {
+    NodeStatus(String nodeId, Engine engine, StorageStats stats,
+               Supplier<Manifest> manifests, Supplier<StatusBuilder.Maintenance> maintenance) {
         this.nodeId = Objects.requireNonNull(nodeId, "nodeId");
         this.engine = Objects.requireNonNull(engine, "engine");
         this.stats = Objects.requireNonNull(stats, "stats");
+        this.manifests = Objects.requireNonNull(manifests, "manifests");
+        this.maintenance = Objects.requireNonNull(maintenance, "maintenance");
     }
 
     /** One consistent engine snapshot, combined with the other modules' parts. */
     StatusBuilder.Snapshot snapshot() {
-        EngineStatus status = engineStatus();
+        EngineStatus status;
+        Manifest manifest;
+        int attempt = 0;
+        do {
+            Manifest before = manifests.get();
+            status = engineStatus();
+            manifest = manifests.get();
+            if (manifest == before) {
+                break;
+            }
+        } while (++attempt < CONSISTENT_READ_ATTEMPTS);
         taken.set(status);
-        return status.toSnapshot(nodeId, walSegments(status), manifest(status),
-                new StatusBuilder.Maintenance("NONE", "IDLE", null, List.of()),
+        return status.toSnapshot(nodeId, walSegments(status),
+                new StatusBuilder.Manifest(manifest.generation(), manifest.nextTableId(),
+                        manifest.flushedThroughSequence()),
+                maintenance.get(),
                 stats.snapshot());
     }
 
@@ -96,19 +114,5 @@ final class NodeStatus {
         segments.add(new StatusBuilder.WalSegment(active.walSegmentId(), "ACTIVE",
                 active.minSequence(), active.maxSequence(), 0));
         return segments;
-    }
-
-    /**
-     * Placeholder until the manifest module exists: derived from the
-     * published tables, generation 0 as for a new database (CP1 §14.2).
-     */
-    private static StatusBuilder.Manifest manifest(EngineStatus status) {
-        long nextTableId = 1;
-        long flushedThrough = 0;
-        for (SSTableMeta table : status.sstables()) {
-            nextTableId = Math.max(nextTableId, table.tableId() + 1);
-            flushedThrough = Math.max(flushedThrough, table.maxSequence());
-        }
-        return new StatusBuilder.Manifest(0, nextTableId, flushedThrough);
     }
 }
