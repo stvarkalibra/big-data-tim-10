@@ -11,6 +11,8 @@ import rs.raf.dlsm.failpoint.FailpointRegistry;
 import rs.raf.dlsm.failpoint.Failpoints;
 import rs.raf.dlsm.failpoint.NoOpFailpoints;
 import rs.raf.dlsm.log.JsonLog;
+import rs.raf.dlsm.recovery.DataDirectory;
+import rs.raf.dlsm.recovery.StartupRecovery;
 import rs.raf.dlsm.server.http.FailpointRoutes;
 import rs.raf.dlsm.server.http.HealthRoutes;
 import rs.raf.dlsm.server.http.HttpServerHost;
@@ -21,6 +23,7 @@ import rs.raf.dlsm.stats.StorageStats;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.nio.file.Path;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
@@ -31,8 +34,15 @@ import java.util.Optional;
  * the public API on 8080, started in that order. The admin server comes
  * first, so liveness answers while the engine is still opening or
  * recovering (PI §20.1); readiness follows the engine's lifecycle.
+ *
+ * <p>With {@code DLSM_DATA_DIR} set the engine is durable: it recovers from
+ * that directory. Without it the node keeps data in memory only, which is
+ * what the unit tests use.
  */
 public final class StandaloneNode implements AutoCloseable {
+
+    /** Environment variable with the data directory (the test harness sets it). */
+    public static final String DATA_DIR_ENV = "DLSM_DATA_DIR";
 
     private final HttpServerHost adminHost;
     private final HttpServerHost publicHost;
@@ -40,11 +50,15 @@ public final class StandaloneNode implements AutoCloseable {
     private final StorageStats stats = new StorageStats();
     /** Present only with {@code TEST_MODE=true} (PI §16.6, §21). */
     private final FailpointRegistry failpointRegistry;
+    /** Null for an in-memory node. */
+    private final Path dataDir;
     private volatile StorageEngine engine;
+    private volatile DataDirectory dataDirectory;
     private volatile NodeStatus status;
     private volatile boolean stopping;
 
-    private StandaloneNode(ServerConfig config, JsonLog log) throws IOException {
+    private StandaloneNode(ServerConfig config, Path dataDir, JsonLog log) throws IOException {
+        this.dataDir = dataDir;
         // Failpoints exist only in test mode; otherwise every hit is a no-op.
         failpointRegistry = config.testMode() ? new FailpointRegistry(true) : null;
         Failpoints failpoints = failpointRegistry != null
@@ -70,10 +84,7 @@ public final class StandaloneNode implements AutoCloseable {
                 new InetSocketAddress(config.adminPort()), admin, log);
         adminHost.start();
         try {
-            // TODO(recovery): open the durable engine over the data directory;
-            // until then the node keeps data in memory only (milestone M1).
-            Engine opened = Engine.openInMemory(
-                    new EngineConfig(config.memtableMaxBytes(), failpoints));
+            Engine opened = openEngine(config, failpoints, log);
             engine = opened;
             status = new NodeStatus(config.nodeId(), opened, stats);
 
@@ -87,8 +98,22 @@ public final class StandaloneNode implements AutoCloseable {
             if (engine != null) {
                 engine.close();
             }
+            closeDirectory();
             throw e;
         }
+    }
+
+    /** Durable when a data directory is given; otherwise in memory (M1). */
+    private Engine openEngine(ServerConfig config, Failpoints failpoints, JsonLog log)
+            throws IOException {
+        EngineConfig engineConfig = new EngineConfig(config.memtableMaxBytes(), failpoints);
+        if (dataDir == null) {
+            return Engine.openInMemory(engineConfig);
+        }
+        StartupRecovery.Opened started = StartupRecovery.open(
+                dataDir, config.nodeId(), engineConfig, stats, log);
+        dataDirectory = started.directory();
+        return started.engine();
     }
 
     public static StandaloneNode start(ServerConfig config, JsonLog log)
@@ -96,7 +121,7 @@ public final class StandaloneNode implements AutoCloseable {
         Objects.requireNonNull(config, "config");
         Objects.requireNonNull(log, "log");
 
-        StandaloneNode node = new StandaloneNode(config, log);
+        StandaloneNode node = new StandaloneNode(config, dataDirFromEnv(), log);
 
         Map<String, Object> fields = new LinkedHashMap<>();
         fields.put("lifecycleState", node.lifecycle().name());
@@ -104,6 +129,12 @@ public final class StandaloneNode implements AutoCloseable {
                 + ", admin port " + node.adminPort());
         log.info("NODE_STARTED", fields);
         return node;
+    }
+
+    /** The data directory from the environment, or null for an in-memory node. */
+    static Path dataDirFromEnv() {
+        String value = System.getenv(DATA_DIR_ENV);
+        return value == null || value.isBlank() ? null : Path.of(value);
     }
 
     /** STARTING until the engine exists, then the engine's lifecycle. */
@@ -159,5 +190,18 @@ public final class StandaloneNode implements AutoCloseable {
         publicHost.close();
         adminHost.close();
         engine.close();
+        closeDirectory();
+    }
+
+    private void closeDirectory() {
+        DataDirectory directory = dataDirectory;
+        if (directory == null) {
+            return;
+        }
+        try {
+            directory.close();
+        } catch (IOException ignored) {
+            // Shutdown: the OS releases the lock when the process ends.
+        }
     }
 }

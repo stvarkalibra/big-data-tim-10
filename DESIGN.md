@@ -178,8 +178,19 @@ Svojstva iz CP1 §12: rezultat je strogo rastući po ključu, bez duplikata, bez
 
 ### 5.3 Put čitanja kroz SSTable
 
-> **Piše Kimi.** Engine od tabele traži samo ugovor `TableSource` (javadoc u kodu): `get` čita najviše kandidat-blok, iterator kreće od `start` preko retkog indeksa, oštećenje je `StorageException` sa kategorijom (u iteratoru `UncheckedStorageException`). Ovde opisati: proveru opsega, Bloom, binarnu pretragu indeksa, čitanje i proveru bloka, brojače (CP1 §11.2, §17, §24).
+Engine od tabele traži samo ugovor `TableSource`: `get` vraća kandidat zapis, a iterator kreće od zadatog ključa. Implementacija za disk je `DiskSSTableTableSource`. Redosled jednog `get(key)` poziva:
 
+1. **Provera opsega.** Ako je `key` izvan `[minKey, maxKey]` iz manifesta, vraća se odsustvo bez ikakvog čitanja sa diska.
+2. **Bloom filter.** Ako filter kaže da ključa sigurno nema, brojač `bloomNegativeSkips` se uvećava i vraća se odsustvo bez čitanja bloka. Ako kaže da ključ **može** biti, uvećava se `bloomPositiveProbes`. Bloom nikad ne daje lažno negativan rezultat (CP1 §17.5).
+3. **Retki indeks.** Binarna pretraga po prvim ključevima blokova bira poslednji blok čiji je prvi ključ ≤ traženog. Nijedan blok pre izabranog se ne čita.
+4. **Jedno čitanje bloka.** Čita se tačno jedan blok (najviše dva za pretragu, CP1 §11.2). Uvećavaju se `sstableDataBlocksRead` i `sstableDataBytesRead`, a blok se dekodira uz proveru CRC32C.
+5. **Pretraga unutar bloka.** Zapis sa tačnim ključem se vraća kao kandidat, i to i kad je tombstone. Engine tek tada odlučuje da li je ključ obrisan (§5.1).
+
+**Oštećenje nije odsustvo.** Ako je blok neispravan (CRC, dužine, redosled) ili fajl nedostaje, poziv baca `StorageException` sa kategorijom (`DATA_BLOCK`, `INDEX`, `BLOOM`, `FOOTER`, `TRUNCATED_REGION`). Nikad se ne vraća prazan rezultat, jer bi to bilo tiho gubljenje podataka (I7).
+
+**Skeniranje** (`iterator`) ne konsultuje Bloom filter, jer ključevi intervala ne moraju postojati. Pozicionira se kroz retki indeks i čita blokove redom. Svaki blok koji čita iteratoru uvećava `rangeScanBlocksRead` (u tom brojaču su i `sstableDataBlocksRead` i `sstableDataBytesRead`).
+
+Validacija cele tabele pri pokretanju (`SSTableValidator.validateFully`) je odvojen put: strimuje ceo fajl i ne koristi Bloom ni indeks za pojedinačne ključeve (§7).
 ---
 
 ## 6. Objavljivanje pri flush-u i compaction-u
@@ -211,8 +222,21 @@ Za vreme rada: oštećenje ili I/O greška na objavljenoj tabeli vodi u `FAILED`
 
 > **Piše Kimi** (CP1 §24).
 
-Engine strana: `Engine.status(ctx)` pravi jedan konzistentan snimak pod read lock-om (radi i u `FAILED`); `NodeStatus` u serveru uzima taj snimak jednom po zahtevu i dopunjuje ga delovima drugih modula.
+**Brojači.** Jedan `StorageStats` za ceo čvor (`AtomicLong` po brojaču, sa tačnim imenima iz CP1 §24). Moduli samo uvećavaju brojače, a nijedan ih ne resetuje sam. Grupe:
 
+- WAL: `walAppendAttempts`, `walAppendsCompleted`, `walForceAttempts`, `walForcesSucceeded`, `walBytesWritten`, `walRecordsReplayed`, `walTornTailsTruncated`;
+- čišćenje pri oporavku: `orphanFilesRemoved`, `temporaryFilesRemoved`;
+- održavanje: `flushAttempts`, `flushPublications`, `compactionAttempts`, `compactionPublications`;
+- SSTable čitanje: `sstableDataBlocksRead`, `sstableDataBytesRead`, `bloomNegativeSkips`, `bloomPositiveProbes`, `rangeScanBlocksRead`;
+- `resetEpoch`: broj resetovanja. Posle `POST /admin/v1/storage/stats/reset` brojači počinju od nule, a epoha se uvećava.
+
+**Endpoint-i** (port 8082):
+
+- `GET /admin/v1/storage/status`: pun pogled iz `StatusBuilder`: `protocolVersion`, `nodeId`, `lifecycle`, `engineMode`, `writeBackpressure`, `backpressuredWriters`, `lastFatalError`, `nextSequence`, `activeMemtable`, `immutableMemtable`, niz `walSegments` (`segmentId`, `role`, `minSequence`, `maxSequence`, `sizeBytes`), objekat `manifest` (`generation`, `nextTableId`, `flushedThroughSequence`, `sstableCount`), niz `sstables` (sortiran po ID-ju), objekat `maintenance` (`operation`, `phase`, `targetSequence`, `inputTableIds`) i objekat `stats` sa svim brojačima.
+- `GET /admin/v1/status`: standalone pogled sa `standaloneStorage` (gore), `partitions:[{partitionId:0, role:"PRIMARY", epoch:0, ...}]`, `metadataRevision:0` i `metadataLeaderId:null`. Vrednosti su fiksne jer u CP1 nema particija ni Raft-a.
+- `POST /admin/v1/storage/stats/reset`: resetuje brojače i vraća novu `resetEpoch`.
+
+**Konzistentnost snimka.** `Engine.status(ctx)` pravi jedan snimak pod read lock-om, pa polja iz istog odgovora pripadaju istom trenutku. Radi i u stanju `FAILED`, da bi se greška mogla videti. `NodeStatus` uzima snimak jednom po zahtevu i dopunjuje ga delovima drugih modula.
 ---
 
 ## 9. Failpoint-i i arhitektura testova
