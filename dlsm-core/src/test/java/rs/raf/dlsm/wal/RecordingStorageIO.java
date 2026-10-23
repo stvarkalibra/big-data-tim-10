@@ -8,6 +8,8 @@ import rs.raf.dlsm.io.StorageIO;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
+import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
@@ -19,8 +21,9 @@ import java.util.Locale;
  * records it as {@code "<call> <file name>"}, optionally failing one kind of
  * call with a plain {@link IOException} before it runs.
  *
- * <p>Windows cannot open a directory as a file channel, so there the real
- * directory force is skipped and only recorded; Linux runs it for real.
+ * <p>Windows cannot open a directory as a file channel, so there only the
+ * real directory force is skipped; its failpoint still fires. Linux runs it
+ * for real.
  */
 public final class RecordingStorageIO implements StorageIO {
 
@@ -28,12 +31,14 @@ public final class RecordingStorageIO implements StorageIO {
             System.getProperty("os.name").toLowerCase(Locale.ROOT).contains("win");
 
     private final DefaultStorageIO delegate;
+    private final Failpoints failpoints;
     private final List<String> calls = new ArrayList<>();
     private final List<Integer> writeSizes = new ArrayList<>();
     private String failingCall;
 
     public RecordingStorageIO(Failpoints failpoints) {
         this.delegate = new DefaultStorageIO(failpoints);
+        this.failpoints = failpoints;
     }
 
     /** The next calls named {@code call} (e.g. {@code "force"}) throw before running. */
@@ -90,10 +95,23 @@ public final class RecordingStorageIO implements StorageIO {
         delegate.atomicReplace(from, to, fpBefore, ctx);
     }
 
+    /**
+     * On Windows only the force itself is skipped. Everything
+     * {@link DefaultStorageIO#fsyncDirectory} does before the force still
+     * happens, in the same order: the failpoint is hit (so an injected
+     * {@code IO_ERROR} or {@code PAUSE} works as on Linux), then a path that
+     * is not a directory fails.
+     */
     @Override
     public void fsyncDirectory(Path dir, String fpBefore, OpContext ctx) throws IOException {
         record("fsyncDirectory", dir);
         if (WINDOWS) {
+            if (fpBefore != null) {
+                failpoints.hit(fpBefore, ctx);
+            }
+            if (!Files.isDirectory(dir, LinkOption.NOFOLLOW_LINKS)) {
+                throw new IOException("Not a directory: " + dir);
+            }
             return;
         }
         delegate.fsyncDirectory(dir, fpBefore, ctx);
