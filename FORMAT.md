@@ -8,7 +8,7 @@ Ovaj fajl opisuje tačne bajtove svih fajlova koje mehanizam upisuje na disk (CP
 | WAL segment i okvir zapisa | §3 | Matej |
 | `node.json` | §4 | Matej |
 | SSTable (Bloom filter, blok podataka, retki indeks) | odeljci „SSTable — …“ ispod | Kimi |
-| `MANIFEST.json` | dodaje se | Ilija |
+| `MANIFEST.json` i dodela ID-ja tabela | §5 | Ilija |
 
 Izmena bilo kog formata je izmena zajedničkog ugovora: najava u grupi, obavezan PR, saglasnost vlasnika i red u `docs/ODLUKE.md` (plan §5.3).
 
@@ -399,6 +399,97 @@ Klasifikacija iz CP1 §14.2. „Stabilni podaci“ su `MANIFEST.json` ili **bilo
 | `nodeId` se razlikuje od konfigurisanog `NODE_ID` | `FAILED` | `NODE_IDENTITY_MISMATCH` |
 
 Zaostali `lsm/tmp/node.json.tmp` nikad ne nadjačava konačni `node.json` i briše se tek posle ove klasifikacije (CP1 §14.2).
+
+## 5. `MANIFEST.json`
+
+Manifest je zvanična lista objavljenih SSTable tabela i granica do koje su mutacije već prenete u SSTable (CP1 §18). Fajl postaje deo baze **samo** ako ga trenutni manifest navodi; finalizovana tabela koju manifest ne navodi je orphan (I4). Manifest je uvek **kompletan snimak** stanja, a ne dnevnik izmena. Nalazi se na `lsm/MANIFEST.json`. Implementacija: paket `rs.raf.dlsm.manifest`.
+
+### 5.1 Sadržaj
+
+UTF-8 JSON objekat, bez BOM-a. Mehanizam piše kompaktan oblik (bez razmaka), sa poljima ovim redosledom:
+
+```json
+{"formatVersion":1,"generation":7,"nextTableId":12,"flushedThroughSequence":812,"sstables":[{"tableId":11,"file":"sst-00000000000000000011.sst","minKey":"customer.0001","maxKey":"customer.0999","minSequence":401,"maxSequence":812,"entryCount":377,"sizeBytes":28194}]}
+```
+
+Početni manifest nove baze (CP1 §14.2, korak 3 inicijalizacije) je tačno:
+
+```json
+{"formatVersion":1,"generation":0,"nextTableId":1,"flushedThroughSequence":0,"sstables":[]}
+```
+
+| Polje | JSON tip | Pravilo |
+|---|---|---|
+| `formatVersion` | ceo broj | Tačno `1`. Svaka druga vrednost je nepodržana verzija. |
+| `generation` | ceo broj (`i64`) | `≥ 0`. Početni manifest ima `0`; svaka objava povećava je za tačno `1`. |
+| `nextTableId` | ceo broj (`i64`) | `≥ 1`. Veći od svakog `tableId` rezervisanog pre upisa ovog manifesta; nikad se ne smanjuje. |
+| `flushedThroughSequence` | ceo broj (`i64`) | `≥ 0`. Svaka važeća mutacija sa `sequence ≤` ove vrednosti već je ugrađena u objavljene tabele (CP1 §18). Pomera ga samo flush; compaction ga ne menja. Nikad se ne smanjuje. |
+| `sstables` | niz objekata | Ceo merodavni skup tabela, ne razlika u odnosu na prethodni manifest. Može biti prazan. |
+
+Polja jedne tabele u `sstables` (isti sadržaj kao `sstable.SSTableMeta`):
+
+| Polje | JSON tip | Pravilo |
+|---|---|---|
+| `tableId` | ceo broj (`i64`) | `≥ 1` i `< nextTableId`. |
+| `file` | string | Tačno `sst-<tableId sa 20 cifara>.sst` (§2), samo ime fajla u `lsm/sst/`, bez putanje. |
+| `minKey`, `maxKey` | string | Ispravni ključevi (§1) i `minKey ≤ maxKey`. |
+| `minSequence`, `maxSequence` | ceo broj (`i64`) | `1 ≤ minSequence ≤ maxSequence ≤ flushedThroughSequence`. |
+| `entryCount` | ceo broj (`i64`) | `≥ 1`. |
+| `sizeBytes` | ceo broj (`i64`) | `≥ 1`. |
+
+CP1 §18 dozvoljava timu da doda polja; mi ih ne dodajemo, pa je čitanje strogo.
+
+### 5.2 Validacija pri čitanju
+
+Čitalac (`ManifestManager.loadAndValidate`) odbija manifest sa `STORAGE_IO` i kategorijom `MANIFEST_INVALID` ako:
+
+- `MANIFEST.json` ne postoji ili nije običan fajl;
+- sadržaj nije ispravan JSON objekat, ima duplirani ključ ili višak sadržaja posle objekta;
+- nedostaje neko polje, postoji nepoznato polje ili polje ima pogrešan tip (npr. string umesto broja, decimalni broj, broj van `i64`);
+- `formatVersion` nije `1`;
+- neka vrednost krši granicu iz tabela u §5.1;
+- dve tabele imaju isti `tableId` ili isti `file`;
+- `file` ne odgovara `tableId`;
+- neka tabela ima `maxSequence > flushedThroughSequence` (nekonzistentan high-water mark, CP1 §18.2).
+
+Ovo je samo strukturna provera. Postojanje i sadržaj navedenih SSTable fajlova proverava oporavak (CP1 §17.3, §18.2). Manifest se nikad ne rekonstruiše nabrajanjem `lsm/sst/`.
+
+### 5.3 Objavljivanje
+
+Ista disciplina kao `node.json` (§4.1), ali se `MANIFEST.json` **zamenjuje** (CP1 §18.1):
+
+1. Polazi se od trenutnog manifesta u memoriji. Izmena (nova tabela, zamena ulaza compaction-a) računa se nad njim, a generacija se povećava za `1` (rebase). Kandidat se proverava pravilima iz §5.2, a uz to `nextTableId` i `flushedThroughSequence` ne smeju biti manji nego u trenutnom manifestu. Neispravan kandidat se odbija pre bilo kakvog upisa.
+2. Zaostali `lsm/tmp/MANIFEST-<generation sa 20 cifara>.tmp` iste generacije se briše, pa se u taj fajl upiše kompletan novi manifest.
+3. Force nad privremenim fajlom.
+4. Failpoint `manifest.after-temp-sync.before-rename`, pa atomska zamena (`ATOMIC_MOVE` + `REPLACE_EXISTING`) preko `lsm/MANIFEST.json`.
+5. Failpoint `manifest.after-rename.before-directory-sync`, pa force nad direktorijumom `lsm/`.
+6. Tek tada se menja manifest u memoriji. Brisanje WAL segmenata ili ulaza compaction-a sme da usledi tek posle ovog koraka.
+
+Objavljivanja su serijalizovana; dva se nikad ne izvršavaju istovremeno. Početni manifest (generacija `0`) objavljuje se istim koracima 2–6, sa privremenim fajlom `MANIFEST-00000000000000000000.tmp`.
+
+**Greške tokom objave** (CP1 §26.1):
+
+| Gde nastaje greška | Stanje na disku | Ishod |
+|---|---|---|
+| Koraci 2–4 (upis, force, preimenovanje; uključuje `IO_ERROR` na `manifest.after-temp-sync.before-rename`) | Stari `MANIFEST.json` netaknut; privremeni fajl se briše. | Posao održavanja ne uspeva, mehanizam ostaje `SERVING`, ponovni pokušaj je dozvoljen (`renamed = false`). |
+| Korak 5 (force direktorijuma; uključuje `IO_ERROR` na `manifest.after-rename.before-directory-sync`) | `MANIFEST.json` je možda nov, ali preimenovanje nije trajno potvrđeno. | Ništa se ne briše, manifest u memoriji ostaje stari, mehanizam prelazi u `FAILED` (`renamed = true`). Restart bira kompletan stari ili novi manifest; oba su bezbedna. |
+
+Pad (`CRASH`) na bilo kojoj od ovih tačaka ostavlja ili kompletan stari ili kompletan novi manifest, nikad mešavinu. Zaostali `MANIFEST-*.tmp` nije dokaz i oporavak ga briše.
+
+### 5.4 Dodela ID-ja tabela
+
+ID-jevi SSTable tabela su prostor imena odvojen od WAL-a (§2). Pri pokretanju, **pre** brisanja orphan i privremenih tabela (CP1 §18.3):
+
+```text
+runtimeNextTableId = max(manifest.nextTableId, 1 + najveći ispravan ID u lsm/sst/ ili lsm/tmp/)
+```
+
+- U obzir se uzimaju imena `sst-<20 cifara>.sst` i privremena imena `sst-<20 cifara>.sst.tmp`, u oba direktorijuma. Druga imena se preskaču.
+- Alokator (`manifest.TableIdAllocator`) vraća trenutnu vrednost, pa je uvećava; jedan ID nikad ne dobiju dva izlaza. Praznine u ID-jevima su dozvoljene, ponovna upotreba nije.
+- Manifest koji objavljuje novu tabelu upisuje `nextTableId = max(prethodni nextTableId, sledeći ID alokatora)`.
+- Prekoračenje (`2^63-1`) je izričit otkaz, nikad ponovna upotreba.
+
+Primer: manifest ima `nextTableId = 5`, a u `lsm/sst/` je ostala orphan tabela `sst-00000000000000000012.sst` iz flush-a prekinutog pre objave. Sledeća dodela je `13`.
 
 ## SSTable — Bloom Filter Format (Version 1)
 
