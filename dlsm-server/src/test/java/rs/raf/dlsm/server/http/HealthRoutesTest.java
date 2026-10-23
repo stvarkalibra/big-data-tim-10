@@ -2,11 +2,13 @@ package rs.raf.dlsm.server.http;
 
 import org.junit.jupiter.api.Test;
 import rs.raf.dlsm.common.Lifecycle;
+import rs.raf.dlsm.engine.EngineStatus;
 import rs.raf.dlsm.engine.OpContext;
 
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -15,10 +17,12 @@ class HealthRoutesTest {
 
     private final AtomicReference<Lifecycle> lifecycle =
             new AtomicReference<>(Lifecycle.RECOVERING);
+    private final AtomicReference<EngineStatus.FatalError> fatal = new AtomicReference<>();
 
     private ApiResponse call(String path) throws Exception {
         Router router = new Router();
-        HealthRoutes.register(router, "standalone", lifecycle::get);
+        HealthRoutes.register(router, "standalone", lifecycle::get,
+                () -> Optional.ofNullable(fatal.get()));
 
         Router.Found found = assertInstanceOf(Router.Found.class,
                 router.match("GET", path));
@@ -68,6 +72,31 @@ class HealthRoutesTest {
             assertEquals("NODE_NOT_READY", r.body().get("code"));
             assertEquals(true, r.body().get("retryable"));
             assertEquals(state.name(), r.body().get("lifecycle"));
+            assertTrue(r.body().containsKey("lastFatalError"));
+            assertNull(r.body().get("lastFatalError"));
         }
+    }
+
+    @Test
+    void failedReadinessCarriesTheFatalError() throws Exception {
+        lifecycle.set(Lifecycle.FAILED);
+        fatal.set(new EngineStatus.FatalError("CHECKSUM",
+                "WAL segment wal-00000000000000000001.log is corrupt at offset 50: bad CRC"));
+
+        ApiResponse r = call("/health/ready");
+
+        assertEquals(503, r.status());
+        assertEquals(Map.of("code", "CHECKSUM", "message",
+                        "WAL segment wal-00000000000000000001.log is corrupt at offset 50: bad CRC"),
+                r.body().get("lastFatalError"));
+    }
+
+    @Test
+    void readyAndLiveBodiesHaveNoFatalError() throws Exception {
+        lifecycle.set(Lifecycle.READY);
+        fatal.set(new EngineStatus.FatalError("CHECKSUM", "stale"));
+
+        assertFalse(call("/health/ready").body().containsKey("lastFatalError"));
+        assertFalse(call("/health/live").body().containsKey("lastFatalError"));
     }
 }

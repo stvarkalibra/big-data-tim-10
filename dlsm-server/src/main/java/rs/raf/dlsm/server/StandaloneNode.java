@@ -6,6 +6,7 @@ import rs.raf.dlsm.common.StorageException;
 import rs.raf.dlsm.common.UncheckedStorageException;
 import rs.raf.dlsm.engine.Engine;
 import rs.raf.dlsm.engine.EngineConfig;
+import rs.raf.dlsm.engine.EngineStatus;
 import rs.raf.dlsm.engine.FlushScheduler;
 import rs.raf.dlsm.engine.MaintenanceHost;
 import rs.raf.dlsm.engine.OpContext;
@@ -48,7 +49,9 @@ import java.util.function.Function;
  *
  * <p>The engine opens through startup recovery over {@code DLSM_DATA_DIR}
  * (CP1 §21.1), with the flush worker as its maintenance. The node holds the
- * directory lock until it closes.
+ * directory lock until it closes. When recovery fails the process stays up
+ * as {@code FAILED} (CP1 §21.4); only a server that cannot bind fails
+ * {@link #start}.
  */
 public final class StandaloneNode implements AutoCloseable {
 
@@ -64,6 +67,9 @@ public final class StandaloneNode implements AutoCloseable {
     private volatile StorageEngine engine;
     private volatile MaintenanceWorker maintenance;
     private volatile NodeStatus status;
+    private volatile boolean recovering;
+    /** Why startup recovery failed; the engine is then a {@link FailedStartupEngine}. */
+    private volatile StorageException startupFailure;
     private volatile boolean stopping;
 
     private StandaloneNode(ServerConfig config, JsonLog log,
@@ -77,7 +83,7 @@ public final class StandaloneNode implements AutoCloseable {
         recovery = new RecoveryProcedure(layout, config.nodeId(), io, failpoints, stats, log);
 
         Router admin = new Router();
-        HealthRoutes.register(admin, config.nodeId(), this::lifecycle);
+        HealthRoutes.register(admin, config.nodeId(), this::lifecycle, this::lastFatalError);
         // Registered before the admin server starts (the router must not
         // change while serving); answers 503 until the engine exists.
         StorageStatusRoutes.register(admin,
@@ -97,13 +103,12 @@ public final class StandaloneNode implements AutoCloseable {
                 new InetSocketAddress(config.adminPort()), admin, log);
         adminHost.start();
         try {
-            Engine opened = openEngine(
-                    new EngineConfig(config.memtableMaxBytes(), failpoints), failpoints, log);
-            engine = opened;
-            status = new NodeStatus(config.nodeId(), opened, stats);
+            StorageEngine served = recoverEngine(new EngineConfig(config.memtableMaxBytes(), failpoints),
+                    config.nodeId(), failpoints, log);
+            engine = served;
 
             Router publicApi = new Router();
-            KvRoutes.register(publicApi, engine);
+            KvRoutes.register(publicApi, served);
             publicHost = HttpServerHost.publicApi(
                     new InetSocketAddress(config.publicPort()), publicApi, log);
             publicHost.start();
@@ -125,17 +130,48 @@ public final class StandaloneNode implements AutoCloseable {
      * CP1 §21.1 steps 1–15 over the data directory. The maintenance worker
      * continues from what recovery proved: the loaded manifest and the
      * table ID allocator built before cleanup (CP1 §18.3).
+     *
+     * <p>When recovery cannot prove the directory state (CP1 §21.4), the
+     * node stays alive as {@code FAILED}: liveness answers, readiness is
+     * {@code 503} with {@code lastFatalError}, public requests get
+     * {@code NODE_NOT_READY}, and the directory stays locked (CP1 §14.1).
+     * Only a restart tries again (CP1 §22).
      */
-    private Engine openEngine(EngineConfig engineConfig, Failpoints failpoints, JsonLog log)
-            throws IOException {
+    private StorageEngine recoverEngine(EngineConfig engineConfig, String nodeId,
+                                        Failpoints failpoints, JsonLog log) {
+        recovering = true;
         try {
-            return recovery.openEngine(engineConfig,
+            Engine opened = recovery.openEngine(engineConfig,
                     (host, recovered) -> startMaintenance(host, recovered, failpoints, log),
                     OpContext.background());
+            status = new NodeStatus(nodeId, opened, stats);
+            return opened;
         } catch (StorageException e) {
-            // TODO(durable-node): stay alive as FAILED instead (CP1 §21.4).
-            throw new IOException("Recovery failed: " + e.getMessage(), e);
+            return failStartup(e, log);
+        } catch (IOException e) {
+            // A recovery step could not be made durable, e.g. the new active
+            // WAL. The message may hold an absolute path, so only the type
+            // reaches responses (PI §17.4); the log gets the whole message.
+            return failStartup(new StorageException(ErrorCode.STORAGE_IO, null,
+                    "Recovery I/O failed: " + e.getClass().getSimpleName(), e), log);
+        } catch (RuntimeException e) {
+            return failStartup(new StorageException(ErrorCode.INTERNAL_ERROR, null,
+                    "Recovery failed unexpectedly: " + e.getClass().getSimpleName(), e), log);
         }
+    }
+
+    private StorageEngine failStartup(StorageException error, JsonLog log) {
+        startupFailure = error;
+        EngineStatus.FatalError fatal = EngineStatus.FatalError.of(error);
+
+        Map<String, Object> fields = new LinkedHashMap<>();
+        fields.put("lifecycleState", Lifecycle.FAILED.name());
+        fields.put("errorCode", fatal.code());
+        fields.put("message", error.getCause() != null
+                ? fatal.message() + " (" + error.getCause() + ")"
+                : fatal.message());
+        log.error("RECOVERY_FAILED", fields);
+        return new FailedStartupEngine();
     }
 
     private FlushScheduler startMaintenance(MaintenanceHost host, RecoveryResult recovered,
@@ -172,13 +208,31 @@ public final class StandaloneNode implements AutoCloseable {
         return node;
     }
 
-    /** STARTING until the engine exists, then the engine's lifecycle. */
+    /**
+     * STARTING, then RECOVERING while startup recovery runs (CP1 §22), then
+     * the engine's lifecycle: READY, or FAILED for good.
+     */
     public Lifecycle lifecycle() {
         if (stopping) {
             return Lifecycle.STOPPING;
         }
         StorageEngine current = engine;
-        return current == null ? Lifecycle.STARTING : current.lifecycle();
+        if (current != null) {
+            return current.lifecycle();
+        }
+        return recovering ? Lifecycle.RECOVERING : Lifecycle.STARTING;
+    }
+
+    /**
+     * Why the node is FAILED: the startup recovery failure, or the engine's
+     * first fatal error while serving (CP1 §22). Empty while healthy.
+     */
+    public Optional<EngineStatus.FatalError> lastFatalError() {
+        StorageException failure = startupFailure;
+        if (failure == null && engine instanceof Engine running) {
+            failure = running.lastFatalError().orElse(null);
+        }
+        return Optional.ofNullable(failure).map(EngineStatus.FatalError::of);
     }
 
     public StorageEngine engine() {
@@ -201,8 +255,10 @@ public final class StandaloneNode implements AutoCloseable {
     private NodeStatus nodeStatus() {
         NodeStatus current = status;
         if (current == null) {
-            throw new UncheckedStorageException(new StorageException(
-                    ErrorCode.NODE_NOT_READY, "Node is starting"));
+            // No engine snapshot exists before recovery ends or after it failed;
+            // the failure itself is reported by /health/ready.
+            throw new UncheckedStorageException(new StorageException(ErrorCode.NODE_NOT_READY,
+                    startupFailure != null ? "Node failed during startup recovery" : "Node is starting"));
         }
         return current;
     }
