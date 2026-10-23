@@ -1,8 +1,13 @@
 {
-  "scenarioId" : "CP1-MDL-001",
-  "seed" : 12345,
-  "status" : "FAILED",
-  "failurePhase" : "GET_MISMATCH",
-  "diagnostics" : "Key key-1 should be present (200), got 404",
-  "artifactPaths" : null
+  "schemaVersion" : 1,
+  "suite" : "checkpoint-1",
+  "seed" : "12345",
+  "selectedCaseIds" : [ "CP1-SST-005" ],
+  "cases" : [ {
+    "id" : "CP1-SST-005",
+    "status" : "PASSED",
+    "seed" : "12345",
+    "durationMs" : 164,
+    "artifactPaths" : [ ]
+  } ]
 }
