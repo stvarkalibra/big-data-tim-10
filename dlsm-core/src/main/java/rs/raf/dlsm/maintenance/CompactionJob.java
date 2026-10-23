@@ -123,6 +123,11 @@ public final class CompactionJob {
             throw failed(e, temp, output);
         } catch (InstallFailure e) {
             throw fatal(e.getCause());
+        } catch (InputCorruption e) {
+            StorageException cause = e.getCause();
+            failed(cause, temp, output);
+            host.reportFatalError(cause);
+            throw cause;
         } catch (Exception e) {
             throw failed(e, temp, output);
         }
@@ -157,7 +162,7 @@ public final class CompactionJob {
         return selected;
     }
 
-    private static long count(List<TableSource> inputs) throws StorageException {
+    private static long count(List<TableSource> inputs) throws InputCorruption {
         Iterator<InternalRecord> merged = open(inputs);
         long count = 0;
         try {
@@ -166,26 +171,32 @@ public final class CompactionJob {
                 count++;
             }
         } catch (UncheckedStorageException e) {
-            throw e.getCause();
+            throw new InputCorruption(e.getCause());
         }
         return count;
     }
 
     private SSTableMeta writeOutput(List<TableSource> inputs, Path temp, Path output, long tableId,
-                                    long entries, OpContext ctx) throws IOException, StorageException {
+                                    long entries, OpContext ctx) throws IOException, InputCorruption {
         try {
             return new SSTableDiskWriter(io).writeAndFinalize(temp, output, tableId, open(inputs), entries, ctx);
         } catch (UncheckedStorageException e) {
-            throw e.getCause();
+            throw new InputCorruption(e.getCause());
         }
     }
 
-    private static Iterator<InternalRecord> open(List<TableSource> inputs) throws StorageException {
+    private static Iterator<InternalRecord> open(List<TableSource> inputs) throws InputCorruption {
         List<Iterator<InternalRecord>> sources = new ArrayList<>(inputs.size());
-        for (TableSource input : inputs) {
-            sources.add(input.iterator(""));
+        try {
+            for (TableSource input : inputs) {
+                sources.add(input.iterator(""));
+            }
+            return new MergingIterator(sources);
+        } catch (StorageException e) {
+            throw new InputCorruption(e);
+        } catch (UncheckedStorageException e) {
+            throw new InputCorruption(e.getCause());
         }
-        return new MergingIterator(sources);
     }
 
     private Manifest publish(List<Long> inputIds, SSTableMeta meta, TableSource table, OpContext ctx)
@@ -263,6 +274,17 @@ public final class CompactionJob {
     private static final class InstallFailure extends Exception {
         InstallFailure(RuntimeException cause) {
             super(cause);
+        }
+    }
+
+    private static final class InputCorruption extends Exception {
+        InputCorruption(StorageException cause) {
+            super(cause);
+        }
+
+        @Override
+        public synchronized StorageException getCause() {
+            return (StorageException) super.getCause();
         }
     }
 }
