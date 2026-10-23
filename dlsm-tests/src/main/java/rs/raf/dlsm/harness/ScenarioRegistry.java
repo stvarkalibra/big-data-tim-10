@@ -1,5 +1,6 @@
 package rs.raf.dlsm.harness;
 
+import rs.raf.dlsm.scenarios.Cp1Api001;
 import rs.raf.dlsm.scenarios.Cp1Api003;
 import rs.raf.dlsm.scenarios.Cp1Fls002;
 import rs.raf.dlsm.scenarios.Cp1Mdl001;
@@ -46,6 +47,7 @@ public final class ScenarioRegistry {
     private static final Map<String, RunnableScenario> implemented = new HashMap<>();
 
     static {
+        register(Cp1Api001.ID, Cp1Api001::run);
         register(Cp1Api003.ID, Cp1Api003::run);
         register(Cp1Sst006.ID, Cp1Sst006::run);
         register("CP1-MDL-001", Cp1Mdl001::run);
