@@ -5,6 +5,7 @@ import rs.raf.dlsm.common.UncheckedStorageException;
 import rs.raf.dlsm.engine.Engine;
 import rs.raf.dlsm.engine.EngineStatus;
 import rs.raf.dlsm.engine.OpContext;
+import rs.raf.dlsm.maintenance.MaintenanceProgress;
 import rs.raf.dlsm.manifest.Manifest;
 import rs.raf.dlsm.stats.StatusBuilder;
 import rs.raf.dlsm.stats.StorageStats;
@@ -23,25 +24,32 @@ import java.util.function.Supplier;
  * for the current request thread; {@link #acceptedSequence()} and
  * {@link #durableSequence()} then read the same snapshot.
  *
- * <p>WAL segments are still derived from the engine's segment ids (sizes
- * unknown in memory); replace them when the WAL module reports real
- * segments. The manifest and maintenance parts come from their modules.
+ * <p>The manifest section is the published manifest that matches the
+ * engine view in the same response, and maintenance is the running job of
+ * the flush and compaction worker. Only the WAL segments are still derived
+ * from the engine's segment ids, with sizes unknown, until the WAL module
+ * reports them.
  */
 final class NodeStatus {
 
     /** Bounds the wait for the engine read lock; status has no request deadline. */
     private static final long STATUS_TIMEOUT_MS = 5000;
-    private static final int CONSISTENT_READ_ATTEMPTS = 3;
+    /** Reads of the engine and the manifest tried before giving the latest pair. */
+    private static final int CONSISTENT_READ_ATTEMPTS = 5;
 
     private final String nodeId;
     private final Engine engine;
     private final StorageStats stats;
     private final Supplier<Manifest> manifests;
-    private final Supplier<StatusBuilder.Maintenance> maintenance;
+    private final MaintenanceProgress maintenance;
     private final ThreadLocal<EngineStatus> taken = new ThreadLocal<>();
 
+    /**
+     * @param manifests   the currently published manifest
+     * @param maintenance the progress of the flush and compaction worker
+     */
     NodeStatus(String nodeId, Engine engine, StorageStats stats,
-               Supplier<Manifest> manifests, Supplier<StatusBuilder.Maintenance> maintenance) {
+               Supplier<Manifest> manifests, MaintenanceProgress maintenance) {
         this.nodeId = Objects.requireNonNull(nodeId, "nodeId");
         this.engine = Objects.requireNonNull(engine, "engine");
         this.stats = Objects.requireNonNull(stats, "stats");
@@ -49,7 +57,13 @@ final class NodeStatus {
         this.maintenance = Objects.requireNonNull(maintenance, "maintenance");
     }
 
-    /** One consistent engine snapshot, combined with the other modules' parts. */
+    /**
+     * One internally consistent snapshot (CP1 §24). A flush or compaction
+     * publishes the manifest and installs the matching view under the
+     * engine write lock, while {@link Engine#status} reads under the read
+     * lock; so when the manifest generation is the same before and after
+     * the engine read, both describe the same moment.
+     */
     StatusBuilder.Snapshot snapshot() {
         EngineStatus status;
         Manifest manifest;
@@ -58,16 +72,15 @@ final class NodeStatus {
             Manifest before = manifests.get();
             status = engineStatus();
             manifest = manifests.get();
-            if (manifest == before) {
+            if (before.generation() == manifest.generation()) {
                 break;
             }
+            // A publication fell between the two reads: read both again.
         } while (++attempt < CONSISTENT_READ_ATTEMPTS);
+
         taken.set(status);
-        return status.toSnapshot(nodeId, walSegments(status),
-                new StatusBuilder.Manifest(manifest.generation(), manifest.nextTableId(),
-                        manifest.flushedThroughSequence()),
-                maintenance.get(),
-                stats.snapshot());
+        return status.toSnapshot(nodeId, walSegments(status), manifest(manifest),
+                maintenance.snapshot(), stats.snapshot());
     }
 
     long acceptedSequence() {
@@ -114,5 +127,10 @@ final class NodeStatus {
         segments.add(new StatusBuilder.WalSegment(active.walSegmentId(), "ACTIVE",
                 active.minSequence(), active.maxSequence(), 0));
         return segments;
+    }
+
+    private static StatusBuilder.Manifest manifest(Manifest manifest) {
+        return new StatusBuilder.Manifest(manifest.generation(), manifest.nextTableId(),
+                manifest.flushedThroughSequence());
     }
 }

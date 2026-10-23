@@ -67,7 +67,8 @@ public final class StandaloneNode implements AutoCloseable {
     private final RecoveryProcedure recovery;
     private volatile StorageEngine engine;
     private volatile MaintenanceWorker maintenance;
-    private final MaintenanceProgress maintenanceProgress = new MaintenanceProgress();
+    /** Shared by the flush and compaction jobs; the status reports it (CP1 §24). */
+    private final MaintenanceProgress progress = new MaintenanceProgress();
     private volatile NodeStatus status;
     private volatile boolean recovering;
     /** Why startup recovery failed; the engine is then a {@link FailedStartupEngine}. */
@@ -147,7 +148,7 @@ public final class StandaloneNode implements AutoCloseable {
                     (host, recovered) -> startMaintenance(host, recovered, failpoints, log),
                     OpContext.background());
             status = new NodeStatus(nodeId, opened, stats,
-                    recovery.manifests()::current, maintenanceProgress::snapshot);
+                    () -> recovery.manifests().current(), progress);
             return opened;
         } catch (StorageException e) {
             return failStartup(e, log);
@@ -180,9 +181,9 @@ public final class StandaloneNode implements AutoCloseable {
     private FlushScheduler startMaintenance(MaintenanceHost host, RecoveryResult recovered,
                                             Failpoints failpoints, JsonLog log) {
         FlushJob flush = new FlushJob(layout, io, failpoints, stats, recovery.manifests(),
-                recovered.tableIds(), host, maintenanceProgress);
+                recovered.tableIds(), host, progress);
         CompactionJob compaction = new CompactionJob(layout, io, failpoints, stats, recovery.manifests(),
-                recovered.tableIds(), host, maintenanceProgress);
+                recovered.tableIds(), host, progress);
         MaintenanceWorker worker = new MaintenanceWorker(host, recovery.manifests(), flush, compaction, log);
         maintenance = worker;
         return worker;
