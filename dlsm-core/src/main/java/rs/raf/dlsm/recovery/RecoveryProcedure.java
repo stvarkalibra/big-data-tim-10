@@ -2,6 +2,10 @@ package rs.raf.dlsm.recovery;
 
 import rs.raf.dlsm.common.ErrorCode;
 import rs.raf.dlsm.common.StorageException;
+import rs.raf.dlsm.engine.Engine;
+import rs.raf.dlsm.engine.EngineConfig;
+import rs.raf.dlsm.engine.FlushScheduler;
+import rs.raf.dlsm.engine.MaintenanceHost;
 import rs.raf.dlsm.engine.OpContext;
 import rs.raf.dlsm.engine.TableSource;
 import rs.raf.dlsm.failpoint.FailpointNames;
@@ -30,6 +34,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.function.Function;
 
 /**
  * Startup recovery, CP1 §21.1 steps 1–15: prove the directory state from
@@ -61,6 +66,33 @@ public final class RecoveryProcedure implements AutoCloseable {
         this.stats = Objects.requireNonNull(stats, "stats");
         this.log = Objects.requireNonNull(log, "log");
         this.manifests = new ManifestManager(layout, io);
+    }
+
+    /**
+     * Runs all of CP1 §21.1: steps 1–14 through {@link #recover}, then step
+     * 15, {@code Engine.open} over the recovered state. The returned engine
+     * is {@code READY}; a recovered generation is handed to the maintenance
+     * worker right after (plan §6.2).
+     *
+     * @param maintenance creates the flush and compaction worker from the
+     *                    engine (its {@code MaintenanceHost})
+     * @throws StorageException with a stable category when recovery must stop;
+     *                          nothing became ready and the directory stays locked
+     */
+    public Engine openEngine(EngineConfig config,
+                             Function<MaintenanceHost, FlushScheduler> maintenance,
+                             OpContext ctx) throws IOException, StorageException {
+
+        Objects.requireNonNull(config, "config");
+        Objects.requireNonNull(maintenance, "maintenance");
+
+        RecoveryResult result = recover(config.memtableMaxBytes(), ctx);
+        try {
+            return Engine.open(config, result.toRecoveredState(), maintenance);   // 15
+        } catch (RuntimeException e) {
+            result.wal().activeLog().close();
+            throw e;
+        }
     }
 
     /**
