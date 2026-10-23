@@ -17,7 +17,7 @@ import rs.raf.dlsm.engine.RecoveredState;
 import rs.raf.dlsm.failpoint.FailpointNames;
 import rs.raf.dlsm.failpoint.FailpointRegistry;
 import rs.raf.dlsm.failpoint.FailpointRegistry.Action;
-import rs.raf.dlsm.io.DefaultStorageIO;
+import rs.raf.dlsm.wal.RecordingStorageIO;
 import rs.raf.dlsm.manifest.Manifest;
 import rs.raf.dlsm.manifest.ManifestManager;
 import rs.raf.dlsm.manifest.TableIdAllocator;
@@ -65,7 +65,7 @@ class CompactionJobTest {
             Files.createDirectories(dir);
         }
         failpoints = new FailpointRegistry(true);
-        DefaultStorageIO io = new DefaultStorageIO(failpoints);
+        RecordingStorageIO io = new RecordingStorageIO(failpoints);
         stats = new StorageStats();
         manifests = new ManifestManager(layout, io);
         manifests.publishInitialManifest(ctx());
@@ -128,7 +128,7 @@ class CompactionJobTest {
     }
 
     private Manifest diskManifest() throws Exception {
-        return new ManifestManager(layout, new DefaultStorageIO(failpoints)).loadAndValidate();
+        return new ManifestManager(layout, new RecordingStorageIO(failpoints)).loadAndValidate();
     }
 
     private List<InternalRecord> records(SSTableMeta meta) throws StorageException {

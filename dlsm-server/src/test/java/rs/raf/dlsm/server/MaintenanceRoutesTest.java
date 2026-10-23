@@ -1,4 +1,4 @@
-package rs.raf.dlsm.server.http;
+package rs.raf.dlsm.server;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -11,7 +11,7 @@ import rs.raf.dlsm.engine.InMemoryWal;
 import rs.raf.dlsm.engine.OpContext;
 import rs.raf.dlsm.engine.RecoveredState;
 import rs.raf.dlsm.failpoint.NoOpFailpoints;
-import rs.raf.dlsm.io.DefaultStorageIO;
+import rs.raf.dlsm.io.StorageIO;
 import rs.raf.dlsm.log.JsonLog;
 import rs.raf.dlsm.maintenance.CompactionJob;
 import rs.raf.dlsm.maintenance.FlushJob;
@@ -20,6 +20,11 @@ import rs.raf.dlsm.maintenance.MaintenanceWorker;
 import rs.raf.dlsm.manifest.ManifestManager;
 import rs.raf.dlsm.manifest.TableIdAllocator;
 import rs.raf.dlsm.recovery.DataLayout;
+import rs.raf.dlsm.server.http.ApiException;
+import rs.raf.dlsm.server.http.ApiRequest;
+import rs.raf.dlsm.server.http.ApiResponse;
+import rs.raf.dlsm.server.http.MaintenanceRoutes;
+import rs.raf.dlsm.server.http.Router;
 import rs.raf.dlsm.stats.StorageStats;
 
 import java.io.ByteArrayOutputStream;
@@ -59,7 +64,7 @@ class MaintenanceRoutesTest {
             Files.createDirectories(dir);
         }
         NoOpFailpoints failpoints = new NoOpFailpoints();
-        DefaultStorageIO io = new DefaultStorageIO(failpoints);
+        StorageIO io = new WindowsSafeStorageIO(failpoints);
         StorageStats stats = new StorageStats();
         ManifestManager manifests = new ManifestManager(layout, io);
         manifests.publishInitialManifest(ctx());
