@@ -47,3 +47,40 @@ Gotovo sav kod i testovi iz Mladenovih grana nastali su u radu sa AI alatom, com
 - **Failpoint-i još nisu povezani.** Pet mesta u `Engine` je samo obeleženo komentarom; čeka se failpoint okvir.
 - **Scenario testovi zavise od harness-a.** CP1-API-004 i API-005 traže failpoint `PAUSE`, pa još nisu napisani kao scenariji.
 - **Za potvrdu kod asistenta:** značenje `minSequence` MemTable generacije (opseg primenjenih mutacija) i odbijanje čitanja posle `FAILED` (`docs/ODLUKE.md`).
+
+---
+
+## Matej — WAL, direktorijum i oporavak
+
+### Alati
+
+- **Claude Code** (desktop aplikacija, model Claude Opus 5.5): čitanje specifikacije, pisanje koda i testova po koracima, pregled kako se Matejev kod uklapa sa tuđim modulima.
+
+### Šta je nastalo uz AI pomoć
+
+| Grana | Komponente |
+|---|---|
+| `matej/common-bin` | `Bin` (big-endian, ograničeno čitanje dužina, CRC32C) |
+| `matej/wal-format` | `FORMAT.md` §WAL sa heksadecimalnim primerom |
+| `matej/wal-codec`, `matej/wal-reader` | `WalCodec`, `WalReader` (klasifikacija `VALID` / `TORN_TAIL` / `CORRUPT`) |
+| `matej/inspect-wal` | `InspectWal` (`inspect wal`) |
+| `matej/wal-segment` | `WalSegments`, `WalSegment`, `WalIdAllocator`, failpoint `wal.after-record-prefix` sa `prefixBytes` |
+| `matej/data-directory` | `DirectoryLock`, `NodeIdentity`, `StartupClassifier`, `DataDirectory` |
+| `matej/recovery-wal`, `matej/recovery` | `WalRecovery`, `RecoveryProcedure` (CP1 §21.1, koraci 1–15) |
+| `matej/fix-recording-storage-io` | test `RecordingStorageIO` na Windows-u |
+| `matej/durable-node` | `DLSM_DATA_DIR`, trajni čvor kroz oporavak sa `MaintenanceWorker`-om, čvor u `FAILED` posle neuspelog oporavka, `lastFatalError` u `/health/ready` |
+
+### Kako je rad pregledan i proveren
+
+- **Specifikacija pre koda.** Za svaki deo AI je prvo čitao odeljak CP1 (§14, §16, §21, §26.1) i plan §6.2; koraci u kodu nose broj koraka iz specifikacije.
+- **Mali commit-ovi, pregled pre svakog.** Grana se pravi pre rada, svaki commit je jedna celina; Matej je pregledao izmenu i sam radio git.
+- **Testovi uz svaki deo.** Codec za svaku klasu greške, reader nad ručno pravljenim segmentima, oporavak nad pravim fajlovima (novi, postojeći i oštećeni direktorijumi), ponovljeni padovi na svakom failpoint-u oporavka, testovi čvora preko HTTP-a (restart, flush, oštećen WAL, zaključan direktorijum).
+- **Pravi I/O na Linux-u.** Na Windows-u testovi preskaču samo force direktorijuma (`RecordingStorageIO`, `WindowsSafeStorageIO`); testovi sa pravim `DefaultStorageIO` su `@EnabledOnOs(LINUX)` i rade u CI-ju.
+- **Odluke zapisane.** Svaki izbor koji spec ne fiksira je u `docs/ODLUKE.md`.
+
+### Poznate slabosti i otvorena pitanja
+
+- **WAL scenariji (CP1-WAL-001..008) još nisu u harness-u.** Pokriveni su unit testovima i testovima čvora; scenariji su sledeća grana.
+- **`RECOVERING` i ubrizgan `IO_ERROR` tokom oporavka nisu testirani na nivou čvora.** Za to treba failpoint naoružan pre pokretanja (`DLSM_TEST_BOOTSTRAP_FAILPOINTS_B64`).
+- **Status čvora koji je pao u oporavku je 503.** Dijagnostika je samo u `/health/ready`, dok Kimi ne odluči da li status sme da ima `activeMemtable: null`.
+- **Windows.** Pravi server na Windows-u ne prolazi force direktorijuma, pa WAL scenariji lokalno rade samo u Docker-u ili CI-ju.

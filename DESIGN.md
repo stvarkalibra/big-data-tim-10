@@ -12,7 +12,7 @@ Urednik fajla je Ilija (plan §15); svaki odeljak piše vlasnik dela sistema.
 | MemTable rotacija i backpressure | §4 | Mladen | popunjeno |
 | algoritmi čitanja i spajanja skeniranja | §5 | Mladen, Kimi (SSTable) | engine deo popunjen |
 | objavljivanje pri flush-u i compaction-u | §6 | Ilija | čeka |
-| oporavak i politika oštećenja | §7 | Matej | čeka |
+| oporavak i politika oštećenja | §7 | Matej | popunjeno |
 | status i brojači | §8 | Kimi | čeka |
 | failpoint-i i arhitektura testova | §9 | Andrija | čeka |
 | namerna odstupanja od preporuka | §10 | svi | popunjeno za Mladenov deo |
@@ -201,7 +201,47 @@ Testovi `EngineMaintenanceTest` i `EngineDiskMaintenanceTest` pokazuju tačan re
 
 > **Piše Matej** (CP1 §14, §16.4, §21).
 
-Engine strana: na kraju oporavka `Engine.open(config, RecoveredState, maintenance)` dobija `lastUsedSequence`, oporavljenu generaciju, tabele iz manifesta i nov aktivni segment; odbija stanje koje bi ponovo upotrebilo redni broj ili WAL segment, vraća spreman mehanizam, odmah traži flush oporavljene generacije i proveru auto-compaction-a.
+Oporavak dokazuje stanje direktorijuma iz tačno tri izvora: manifesta, tabela koje manifest navodi i WAL sufiksa koji manifest ne pokriva. Listing direktorijuma nikad ne odlučuje šta je objavljeno (I4). On služi samo za dve stvari: da se nađu privremeni i orphan fajlovi i da alokatori ID-jeva preskoče svaki ID koji postoji na disku (CP1 §16.1, §18.3). Ništa ne postaje `READY` dok svi koraci ne uspeju.
+
+### 7.1 Koraci i kod
+
+Ulaz je `RecoveryProcedure.openEngine`; `recover` radi korake 1–14, a `Engine.open` korak 15.
+
+| CP1 §21.1 | Kod | Šta je bitno |
+|---|---|---|
+| 1–2 | `DataDirectory.open` | `LOCK` kroz `tryLock()`, bez čekanja; zatečeno stanje se klasifikuje (`StartupClassifier`) pre bilo kakvog pisanja; `node.json` i direktorijumi se proveravaju ili se prva inicijalizacija bezbedno nastavlja |
+| 3 | `ManifestManager.loadAndValidate` (Ilija) | prazan manifest nastaje samo za dokazano novu bazu, kroz `ManifestInitializer`; posle učitavanja failpoint `recovery.after-manifest-load` |
+| 4 | `SSTableRecoveryVerifier.verifyAll` (Kimi) | svaka navedena tabela se strimovanjem proverava **pre** čišćenja, da neispravan izvor ne odluči šta se briše |
+| — | `WalIdAllocator.fromDisk`, `TableIdAllocator.fromDisk` | računaju se pre čišćenja, pa ID obrisanog ostatka ostaje zauzet |
+| 5–6 | `removeTemporaryAndOrphanFiles` | briše se sve iz `tmp/` i svaki `sst-<id>.sst` koji manifest ne navodi; fajl nepoznatog imena ostaje (`RECOVERY_UNKNOWN_FILE`); force direktorijuma |
+| 7–9 | `WalRecovery`, `WalReader` | segmenti rastućim ID-jem; odseca se samo nepotpun završni okvir celog WAL-a, pa force; failpoint `recovery.after-wal-tail-truncate` |
+| 10–11 | `WalRecovery` | zapisi iznad `flushedThroughSequence` idu u oporavljenu generaciju 1; sledeći redni broj je `max(flushedThroughSequence, najveći ispravan WAL seq) + 1` |
+| 12–13 | `WalRecovery` | nov aktivni segment protokolom iz CP1 §16, tek onda brisanje praznih i pokrivenih segmenata; failpoint `recovery.after-wal-replay.before-ready` |
+| 14 | `openTables` | čitač (indeks i Bloom filter u memoriji) za svaku tabelu iz manifesta |
+| 15 | `Engine.open` (Mladen) | mehanizam je `READY`; oporavljena generacija odmah ide radniku na flush |
+
+Engine strana: `Engine.open(config, RecoveredState, maintenance)` dobija `lastUsedSequence`, oporavljenu generaciju, tabele iz manifesta i nov aktivni segment; odbija stanje koje bi ponovo upotrebilo redni broj ili WAL segment, vraća spreman mehanizam, odmah traži flush oporavljene generacije i proveru auto-compaction-a. Radnika održavanja pravi `RecoveryProcedure.MaintenanceFactory`, koja uz mehanizam dobija i `RecoveryResult`; tako Ilijin `FlushJob` nastavlja sa alokatorom ID-jeva tabela iz oporavka.
+
+Pad u bilo kom koraku je bezbedan: svaki korak ili ne menja disk, ili ostavlja stanje koje sledeći oporavak klasifikuje isto, pa ponovljen oporavak daje isti logički rezultat (CP1-WAL-008; testovi `RecoveryFailpointTest` i `WalRecoveryFailpointTest`).
+
+### 7.2 Nepotpun završetak naspram oštećenja
+
+- Odseca se samo okvir koji je poslednji u **celom** WAL-u i fizički nepotpun. Okvir iza koga postoji drugi okvir nije nastao padom, pa je oštećenje (`WAL_FRAME`).
+- Komplement dužine se proverava pre EOF-a. Oštećena dužina zato nikad ne izgleda kao nepotpun završetak (`WAL_LENGTH_GUARD`).
+- Kompletan okvir sa lošim CRC-om je oštećenje (`CHECKSUM`) i kada je fizički poslednji u fajlu, jer može da sadrži potvrđenu mutaciju (I7, CP1-WAL-003).
+- Oštećenje se nikad ne popravlja i ne preskače: fajl ostaje bajt po bajt isti, novi segment se ne pravi, a pokretanje staje. Redosled provera i kategorije su u `FORMAT.md` §3.4.
+
+### 7.3 Čvor i neuspeh oporavka
+
+`StandaloneNode` pokreće admin server (8082), zatim oporavak nad `DLSM_DATA_DIR`, pa javni server (8080). Životni ciklus je `STARTING → RECOVERING → READY`, ili `FAILED` (CP1 §22).
+
+Kada oporavak ne uspe (CP1 §21.4), proces **ostaje živ** u `FAILED`:
+
+- `/health/live` je 200, a `/health/ready` je 503 sa `lifecycle: FAILED` i `lastFatalError`. `code` je stabilna kategorija (npr. `CHECKSUM`, `DIRECTORY_LOCKED`, `MANIFEST_INVALID`), a `message` za WAL navodi segment i offset, bez apsolutnih putanja;
+- javni port je otvoren, ali svaki KV zahtev dobija `503 NODE_NOT_READY`. Ni ključevi zapisani pre oštećenja se ne služe, jer stanje nije dokazano;
+- status rute su 503, jer bez mehanizma nema snimka;
+- `LOCK` ostaje zauzet do kraja procesa, pa drugi proces ne može da menja isti direktorijum;
+- iz `FAILED` nema povratka u istom procesu; ponovo pokušava tek restart.
 
 Za vreme rada: oštećenje ili I/O greška na objavljenoj tabeli vodi u `FAILED`; posle toga se odbijaju i mutacije i čitanja (§10).
 
@@ -237,5 +277,7 @@ Izbori koji se tiču mehanizma i API-ja (obrazloženja u `docs/ODLUKE.md`):
 | HTTP: JDK `HttpServer`, `X-Request-Id` obavezan na 8080, telo ≤ 512 KiB, 404/405 za rute | `ODLUKE.md`, HTTP redovi |
 | ugovor engine ↔ održavanje i ulaz za oporavak (razlike od skice u planu §5.1) | `ODLUKE.md`, redovi o `MaintenanceHost` i `Engine.open` |
 | oporavljena generacija se flush-uje **posle** `READY` | `ODLUKE.md`, red o `Engine.open` |
+| posle neuspelog oporavka čvor ostaje živ u `FAILED`; dijagnostika je u `/health/ready` (`lastFatalError`), javni port vraća 503 | `ODLUKE.md`, red o neuspelom oporavku od 23.10.2026. |
+| `DLSM_DATA_DIR` (podrazumevano `/var/lib/dlsm`) bira direktorijum podataka | `ODLUKE.md`, red o `DLSM_DATA_DIR` |
 
 Privremeno, samo do isporuke pravih delova (M1): `InMemoryWal`, `InMemoryFlusher`/`MemoryTable` i privremeni delovi statusa u `NodeStatus` (WAL segmenti bez veličine, manifest izveden iz tabela, održavanje uvek `IDLE`).
