@@ -11,10 +11,12 @@ import rs.raf.dlsm.failpoint.FailpointRegistry;
 import rs.raf.dlsm.failpoint.Failpoints;
 import rs.raf.dlsm.failpoint.NoOpFailpoints;
 import rs.raf.dlsm.log.JsonLog;
+import rs.raf.dlsm.maintenance.MaintenanceWorker;
 import rs.raf.dlsm.server.http.FailpointRoutes;
 import rs.raf.dlsm.server.http.HealthRoutes;
 import rs.raf.dlsm.server.http.HttpServerHost;
 import rs.raf.dlsm.server.http.KvRoutes;
+import rs.raf.dlsm.server.http.MaintenanceRoutes;
 import rs.raf.dlsm.server.http.Router;
 import rs.raf.dlsm.server.http.StorageStatusRoutes;
 import rs.raf.dlsm.stats.StorageStats;
@@ -41,6 +43,7 @@ public final class StandaloneNode implements AutoCloseable {
     /** Present only with {@code TEST_MODE=true} (PI §16.6, §21). */
     private final FailpointRegistry failpointRegistry;
     private volatile StorageEngine engine;
+    private volatile MaintenanceWorker maintenance;
     private volatile NodeStatus status;
     private volatile boolean stopping;
 
@@ -59,6 +62,7 @@ public final class StandaloneNode implements AutoCloseable {
                 () -> nodeStatus().acceptedSequence(),
                 () -> nodeStatus().durableSequence(),
                 stats);
+        MaintenanceRoutes.register(admin, () -> maintenance);
         // The failpoint control API exists only in test mode (PI §21.1).
         if (failpointRegistry != null) {
             FailpointRoutes.register(admin, failpointRegistry);
