@@ -3,6 +3,7 @@ package rs.raf.dlsm.recovery;
 import rs.raf.dlsm.common.ErrorCode;
 import rs.raf.dlsm.common.StorageException;
 import rs.raf.dlsm.engine.OpContext;
+import rs.raf.dlsm.engine.TableSource;
 import rs.raf.dlsm.failpoint.FailpointNames;
 import rs.raf.dlsm.failpoint.Failpoints;
 import rs.raf.dlsm.io.StorageIO;
@@ -10,10 +11,12 @@ import rs.raf.dlsm.log.JsonLog;
 import rs.raf.dlsm.manifest.Manifest;
 import rs.raf.dlsm.manifest.ManifestManager;
 import rs.raf.dlsm.manifest.TableIdAllocator;
+import rs.raf.dlsm.sstable.DiskSSTableTableSource;
 import rs.raf.dlsm.sstable.SSTableMeta;
 import rs.raf.dlsm.sstable.SSTableRecoveryVerifier;
 import rs.raf.dlsm.sstable.SSTableValidator;
 import rs.raf.dlsm.stats.StorageStats;
+import rs.raf.dlsm.wal.WalIdAllocator;
 
 import java.io.IOException;
 import java.nio.file.DirectoryStream;
@@ -58,6 +61,73 @@ public final class RecoveryProcedure implements AutoCloseable {
         this.stats = Objects.requireNonNull(stats, "stats");
         this.log = Objects.requireNonNull(log, "log");
         this.manifests = new ManifestManager(layout, io);
+    }
+
+    /**
+     * Runs CP1 §21.1 steps 1–14 in order. The engine opens over the result
+     * (step 15); until then nothing is {@code READY}.
+     *
+     * <ol>
+     *   <li>steps 1–3: lock, identity and directories, manifest
+     *       ({@code recovery.after-manifest-load});</li>
+     *   <li>step 4: every referenced table is validated;</li>
+     *   <li>WAL and table ID allocators are built from disk, before cleanup;</li>
+     *   <li>steps 5–6: temporary and orphan files are removed;</li>
+     *   <li>steps 7–13: the WAL part ({@link WalRecovery});</li>
+     *   <li>step 14: a reader for every referenced table.</li>
+     * </ol>
+     *
+     * @param memtableMaxBytes {@code MEMTABLE_MAX_BYTES} for the recovered generation
+     * @throws StorageException with a stable category when the directory, the
+     *                          manifest, a table or the WAL is invalid (CP1 §21.4)
+     * @throws IOException      when a recovery step cannot be made durable
+     */
+    public RecoveryResult recover(long memtableMaxBytes, OpContext ctx)
+            throws IOException, StorageException {
+
+        Manifest manifest = openDirectoryAndLoadManifest(ctx);                        // 1–3
+        validateTables(manifest);                                                       // 4
+
+        // Before cleanup, so IDs of deleted leftovers are never reused (CP1 §16.1, §18.3).
+        WalIdAllocator walIds = WalIdAllocator.fromDisk(layout.walDir(), layout.tmpDir());
+        TableIdAllocator tableIds = TableIdAllocator.fromDisk(manifest, layout.sstDir(), layout.tmpDir());
+
+        removeTemporaryAndOrphanFiles(manifest, ctx);                                   // 5–6
+
+        WalRecoveryResult wal = new WalRecovery(layout, io, failpoints, stats, log)
+                .run(manifest.flushedThroughSequence(), walIds, memtableMaxBytes, ctx);  // 7–13
+
+        List<TableSource> tables;
+        try {
+            tables = openTables(manifest);                                              // 14
+        } catch (StorageException | RuntimeException e) {
+            wal.activeLog().close();
+            throw e;
+        }
+
+        Map<String, Object> fields = new LinkedHashMap<>();
+        fields.put("manifestGeneration", manifest.generation());
+        fields.put("sequence", wal.lastUsedSequence());
+        fields.put("walSegmentId", wal.activeLog().segmentId());
+        fields.put("message", "Recovered " + tables.size() + " tables and "
+                + (wal.recoveredGeneration() == null ? 0 : wal.recoveredGeneration().entryCount())
+                + " WAL keys; next sequence " + (wal.lastUsedSequence() + 1));
+        log.info("RECOVERY_COMPLETE", fields);
+
+        return new RecoveryResult(directory.foundState(), manifest, tables, tableIds, wal);
+    }
+
+    /**
+     * Step 14: an in-memory index and Bloom filter for every referenced
+     * table, in manifest order. Opening validates the table again, which
+     * also guards against a change between step 4 and now.
+     */
+    List<TableSource> openTables(Manifest manifest) throws StorageException {
+        List<TableSource> tables = new ArrayList<>();
+        for (SSTableMeta meta : manifest.sstables()) {
+            tables.add(DiskSSTableTableSource.open(layout.sstDir().resolve(meta.file()), meta, stats));
+        }
+        return tables;
     }
 
     /**
