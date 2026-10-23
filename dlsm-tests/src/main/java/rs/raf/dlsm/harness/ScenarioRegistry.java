@@ -1,6 +1,7 @@
 package rs.raf.dlsm.harness;
 
 import rs.raf.dlsm.scenarios.Cp1Api001;
+import rs.raf.dlsm.scenarios.Cp1Api002;
 import rs.raf.dlsm.scenarios.Cp1Api003;
 import rs.raf.dlsm.scenarios.Cp1Api004;
 import rs.raf.dlsm.scenarios.Cp1Fls002;
@@ -49,6 +50,7 @@ public final class ScenarioRegistry {
 
     static {
         register(Cp1Api001.ID, Cp1Api001::run);
+        register(Cp1Api002.ID, Cp1Api002::run);
         register(Cp1Api003.ID, Cp1Api003::run);
         register(Cp1Api004.ID, Cp1Api004::run);
         register(Cp1Sst006.ID, Cp1Sst006::run);
