@@ -183,6 +183,7 @@ public final class MaintenanceWorker implements FlushScheduler {
 
     private void record(String operation, StorageException e) {
         lastError = e;
+        flushJob.progress().failed(e);
         log.error("MAINTENANCE_FAILED", Map.of(
                 "operation", operation,
                 "errorCode", e.category() != null ? e.category() : e.code().name(),

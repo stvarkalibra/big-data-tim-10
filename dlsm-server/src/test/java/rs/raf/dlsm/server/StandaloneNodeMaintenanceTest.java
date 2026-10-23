@@ -6,6 +6,8 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import rs.raf.dlsm.failpoint.FailpointNames;
+import rs.raf.dlsm.failpoint.FailpointRegistry;
 import rs.raf.dlsm.log.JsonLog;
 import rs.raf.dlsm.recovery.DataLayout;
 import rs.raf.dlsm.sstable.SSTableMeta;
@@ -20,6 +22,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -39,7 +42,7 @@ class StandaloneNodeMaintenanceTest {
                 new PrintStream(new ByteArrayOutputStream(), true, StandardCharsets.UTF_8),
                 Clock.systemUTC());
         node = StandaloneNode.start(
-                new ServerConfig("standalone", 0, 0, 1 << 20).withDataDir(dataDir), log,
+                new ServerConfig("standalone", 0, 0, 1 << 20).withTestMode(true).withDataDir(dataDir), log,
                 WindowsSafeStorageIO::new);
     }
 
@@ -65,6 +68,42 @@ class StandaloneNodeMaintenanceTest {
         node.close();
         node = null;
         start();
+    }
+
+    @Test
+    void failedMaintenanceShowsInStatusWhileNodeStaysReady() throws Exception {
+        assertTrue(status().get("maintenance").get("lastError").isNull());
+        node.failpointRegistry().orElseThrow().addRule(new FailpointRegistry.Rule("tok-manifest",
+                FailpointNames.MANIFEST_AFTER_TEMP_SYNC_BEFORE_RENAME, FailpointRegistry.Action.IO_ERROR,
+                0, 1, 0, Map.of()));
+        put("alpha");
+
+        HttpResponse<String> failed = post(node.adminPort(), "/admin/v1/storage/flush", null);
+
+        assertEquals(500, failed.statusCode(), failed.body());
+        JsonNode s = status();
+        assertEquals("READY", s.get("lifecycle").asText());
+        assertTrue(s.get("lastFatalError").isNull());
+        JsonNode lastError = s.get("maintenance").get("lastError");
+        assertEquals("STORAGE_IO", lastError.get("code").asText());
+        assertFalse(lastError.get("message").asText().isEmpty());
+
+        JsonNode settled = awaitIdleWithGeneration(1);
+        assertEquals(lastError, settled.get("maintenance").get("lastError"));
+    }
+
+    private JsonNode awaitIdleWithGeneration(long generation) throws Exception {
+        long deadline = System.nanoTime() + 10_000_000_000L;
+        JsonNode s = status();
+        while (!("IDLE".equals(s.get("maintenance").get("phase").asText())
+                && s.get("manifest").get("generation").asLong() == generation)
+                && System.nanoTime() < deadline) {
+            Thread.onSpinWait();
+            s = status();
+        }
+        assertEquals("IDLE", s.get("maintenance").get("phase").asText(), s.toString());
+        assertEquals(generation, s.get("manifest").get("generation").asLong(), s.toString());
+        return s;
     }
 
     @Test
