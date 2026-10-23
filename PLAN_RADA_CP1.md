@@ -436,17 +436,17 @@ Svaka sekcija ima isti oblik: cilj, šta pročitati, isporuke, failpoint-i, broj
 
 **Isporuke**
 
-- [ ] `StorageStats`: svi brojači iz CP1 §24 sa **tačnim** imenima, `AtomicLong`, `resetEpoch` — **dan 2**, jer ih svi uvećavaju.
-- [ ] `JsonLog`: jedan JSON objekat po redu na stdout sa poljima iz PI §20.3 i CP1 §27, bez sadržaja vrednosti — **do M1**.
-- [ ] `FORMAT.md` §SSTable: zaglavlje (magic, verzija, `tableId`), blokovi podataka (okvir, zapisi, CRC32C), retki indeks (prvi ključ → offset, dužina; CRC), Bloom (`m`, `k`, ID heša, bitovi, CRC), footer fiksne veličine (offset-i i dužine oblasti, min/max ključ, min/max seq, `entryCount`, CRC). Heksadecimalni ili dekodirani primer male tabele.
-- [ ] `BloomFilter`: `m = max(64, 10n)` bitova zaokruženo na cele bajtove, `k=7`, SHA-256 → `h1`, `h2` (h2 neparan), proba `h1 + i*h2`, `Long.remainderUnsigned(x, m)`, eksplicitna serijalizacija `byte[]` sa dokumentovanim numerisanjem bitova (CP1 §17.5).
-- [ ] `SSTableWriter`: strimovanje iz uređenog ulaza bez duplikata (odbija opadajući ili dupli ključ), pravilo pakovanja od 4096 bajtova, tombstone ide u blok i u Bloom, footer, samoprovera produkcionim reader-om, vraća `SSTableMeta` (CP1 §17.6, 8 koraka).
-- [ ] `SSTableFinalizer`: `force(tmp)` → `atomicMoveNoReplace(tmp, sst/sst-<id>.sst)` (postojeće odredište je greška) → `fsyncDirectory(sst/)`. Ovde žive sva tri `sstable.*` failpoint-a. Koriste ga i flush i compaction.
-- [ ] `SSTableReader.open`: validacija footer-a i oblasti, indeks i Bloom u memoriji. `get(key)`: opseg → Bloom → binarna pretraga indeksa (poslednji prvi-ključ ≤ traženi) → jedno čitanje bloka (najviše dva) → CRC → pretraga unutar bloka. Oštećenje daje `StorageException`, **nikad** `NOT_FOUND` (CP1 §11.2).
-- [ ] `SSTableIterator`: pozicioniranje kroz indeks blizu `startInclusive`, zatim redom kroz blokove. Nikad od nultog bloka (CP1 §12, §17.4).
+- [x] `StorageStats`: svi brojači iz CP1 §24 sa **tačnim** imenima, `AtomicLong`, `resetEpoch` — **dan 2**, jer ih svi uvećavaju.
+- [x] `JsonLog`: jedan JSON objekat po redu na stdout sa poljima iz PI §20.3 i CP1 §27, bez sadržaja vrednosti — **do M1**.
+- [x] `FORMAT.md` §SSTable: zaglavlje (magic, verzija, `tableId`), blokovi podataka (okvir, zapisi, CRC32C), retki indeks (prvi ključ → offset, dužina; CRC), Bloom (`m`, `k`, ID heša, bitovi, CRC), footer fiksne veličine (offset-i i dužine oblasti, min/max ključ, min/max seq, `entryCount`, CRC). Heksadecimalni ili dekodirani primer male tabele.
+- [x] `BloomFilter`: `m = max(64, 10n)` bitova zaokruženo na cele bajtove, `k=7`, SHA-256 → `h1`, `h2` (h2 neparan), proba `h1 + i*h2`, `Long.remainderUnsigned(x, m)`, eksplicitna serijalizacija `byte[]` sa dokumentovanim numerisanjem bitova (CP1 §17.5).
+- [x] `SSTableWriter`: strimovanje iz uređenog ulaza bez duplikata (odbija opadajući ili dupli ključ), pravilo pakovanja od 4096 bajtova, tombstone ide u blok i u Bloom, footer, samoprovera produkcionim reader-om, vraća `SSTableMeta` (CP1 §17.6, 8 koraka).
+- [x] `SSTableFinalizer`: `force(tmp)` → `atomicMoveNoReplace(tmp, sst/sst-<id>.sst)` (postojeće odredište je greška) → `fsyncDirectory(sst/)`. Ovde žive sva tri `sstable.*` failpoint-a. Koriste ga i flush i compaction.
+- [x] `SSTableReader.open`: validacija footer-a i oblasti, indeks i Bloom u memoriji. `get(key)`: opseg → Bloom → binarna pretraga indeksa (poslednji prvi-ključ ≤ traženi) → jedno čitanje bloka (najviše dva) → CRC → pretraga unutar bloka. Oštećenje daje `StorageException`, **nikad** `NOT_FOUND` (CP1 §11.2).
+- [x] `SSTableIterator`: pozicioniranje kroz indeks blizu `startInclusive`, zatim redom kroz blokove. Nikad od nultog bloka (CP1 §12, §17.4).
 - [ ] `SSTableValidator.validateFully`: strimovanje kroz ceo fajl (zaglavlje, svaki blok i njegov CRC, redosled ključeva, indeks, Bloom, footer, granice oblasti, slaganje sa manifestom) bez držanja svih blokova u memoriji. Kategorije: `DATA_BLOCK`, `INDEX`, `BLOOM`, `FOOTER`, `TRUNCATED_REGION`, `MANIFEST_TABLE_MISMATCH` (CP1 §17.3, §29.4 SST-006).
-- [ ] `inspect sstable <file-or-table-id>`: zaglavlje, CRC status, blokovi i offset-i, stavke indeksa, zapisi sa `sequence` i vrstom, jasna razlika između tombstone-a i prazne vrednosti.
-- [ ] Status endpoint-i: `GET /admin/v1/storage/status` (pun JSON iz CP1 §24, snimak pod engine read lock-om, nizovi sortirani po ID-ju), `GET /admin/v1/status` (`standaloneStorage`, `partitions:[{partitionId:0, role:"PRIMARY", epoch:0, ...}]`, `metadataRevision=0`, `metadataLeaderId=null`) i `POST /admin/v1/storage/stats/reset`.
+- [x] `inspect sstable <file-or-table-id>`: zaglavlje, CRC status, blokovi i offset-i, stavke indeksa, zapisi sa `sequence` i vrstom, jasna razlika između tombstone-a i prazne vrednosti.
+- [x] Status endpoint-i: `GET /admin/v1/storage/status` (pun JSON iz CP1 §24, snimak pod engine read lock-om, nizovi sortirani po ID-ju), `GET /admin/v1/status` (`standaloneStorage`, `partitions:[{partitionId:0, role:"PRIMARY", epoch:0, ...}]`, `metadataRevision=0`, `metadataLeaderId=null`) i `POST /admin/v1/storage/stats/reset`.
 
 **Failpoint-i:** `sstable.after-write.before-sync`, `sstable.after-sync.before-rename`, `sstable.after-rename.before-directory-sync` (sva tri i sa `IO_ERROR`).
 
