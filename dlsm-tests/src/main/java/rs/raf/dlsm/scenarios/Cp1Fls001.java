@@ -1,30 +1,24 @@
 package rs.raf.dlsm.scenarios;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import rs.raf.dlsm.harness.Await;
 import rs.raf.dlsm.harness.Report;
 import rs.raf.dlsm.model.ReferenceModel;
 
 import java.io.IOException;
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.time.Duration;
 import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Base64;
 import java.util.HashSet;
-import java.util.HexFormat;
 import java.util.List;
-import java.util.Map;
-import java.util.Optional;
 import java.util.Random;
 import java.util.Set;
-import java.util.stream.Stream;
+
+import static rs.raf.dlsm.scenarios.FlushScenarioChecks.awaitIdle;
+import static rs.raf.dlsm.scenarios.FlushScenarioChecks.expectModel;
+import static rs.raf.dlsm.scenarios.FlushScenarioChecks.finalTables;
+import static rs.raf.dlsm.scenarios.FlushScenarioChecks.flush;
+import static rs.raf.dlsm.scenarios.FlushScenarioChecks.ids;
+import static rs.raf.dlsm.scenarios.FlushScenarioChecks.tableIds;
 
 /**
  * CP1-FLS-001 — manual flush, no-op flush and restart (CP1 §29.3).
@@ -68,13 +62,6 @@ public final class Cp1Fls001 {
 
     private static final int PUBLIC_PORT = 18210;
     private static final int ADMIN_PORT = 18211;
-    private static final Duration IDLE_TIMEOUT = Duration.ofSeconds(10);
-    private static final String SCAN_START = "a";
-    private static final String SCAN_END = "z";
-    private static final int SCAN_LIMIT = 1000;
-
-    private static final ObjectMapper MAPPER = new ObjectMapper();
-    private static final HttpClient HTTP = HttpClient.newHttpClient();
 
     private Cp1Fls001() {
     }
@@ -99,6 +86,20 @@ public final class Cp1Fls001 {
         return mutations;
     }
 
+    static void apply(WalScenarioNode node, List<Mutation> mutations, ReferenceModel model, Set<String> keys)
+            throws Exception {
+        for (Mutation mutation : mutations) {
+            keys.add(mutation.key());
+            if (mutation.isDelete()) {
+                node.delete(mutation.key());
+                model.delete(mutation.key());
+            } else {
+                node.put(mutation.key(), mutation.value());
+                model.put(mutation.key(), mutation.value());
+            }
+        }
+    }
+
     public static void run(long seed, Report report) throws Exception {
         List<Mutation> mutations = mutations(seed);
         ReferenceModel model = new ReferenceModel();
@@ -112,21 +113,12 @@ public final class Cp1Fls001 {
                             && fresh.path("sstables").isEmpty(), "initial state",
                     "expected manifest generation 0 and no SSTable: " + fresh.path("manifest"));
 
-            for (Mutation mutation : mutations) {
-                keys.add(mutation.key());
-                if (mutation.isDelete()) {
-                    node.delete(mutation.key());
-                    model.delete(mutation.key());
-                } else {
-                    node.put(mutation.key(), mutation.value());
-                    model.put(mutation.key(), mutation.value());
-                }
-            }
+            apply(node, mutations, model, keys);
             long target = mutations.size();
             node.check(node.storageStatus().path("nextSequence").asLong() == target + 1, "setup",
                     "the mix should use sequences 1.." + target);
 
-            JsonNode first = flush(node, "first flush");
+            JsonNode first = flush(node, ADMIN_PORT, "first flush");
             node.check("PUBLISHED".equals(first.path("result").asText()), "first flush",
                     "result " + first.path("result") + ", expected PUBLISHED");
             node.check(first.path("targetSequence").asLong() == target, "first flush",
@@ -139,10 +131,10 @@ public final class Cp1Fls001 {
             long generation = first.path("manifestGeneration").asLong();
             List<Long> published = ids(first.path("publishedTableIds"));
 
-            JsonNode settled = awaitIdle(node);
+            JsonNode settled = awaitIdle(node, ID);
             expectPublishedState(node, settled, generation, published, target);
 
-            JsonNode second = flush(node, "second flush");
+            JsonNode second = flush(node, ADMIN_PORT, "second flush");
             node.check("NO_OP".equals(second.path("result").asText()), "second flush",
                     "result " + second.path("result") + ", expected NO_OP");
             node.check(second.path("publishedTableIds").isArray()
@@ -171,39 +163,6 @@ public final class Cp1Fls001 {
         report.pass();
     }
 
-    private static JsonNode flush(WalScenarioNode node, String what) throws Exception {
-        String requestId = node.nextRequestId();
-        HttpResponse<String> response = HTTP.send(HttpRequest.newBuilder(
-                        URI.create("http://localhost:" + ADMIN_PORT + "/admin/v1/storage/flush"))
-                        .header("X-Request-Id", requestId)
-                        .header("X-Request-Timeout-Ms", Long.toString(WalScenarioNode.TIMEOUT_MS))
-                        .POST(HttpRequest.BodyPublishers.ofString("{}"))
-                        .build(),
-                HttpResponse.BodyHandlers.ofString());
-        node.check(response.statusCode() == 200, what + " (" + requestId + ")",
-                "HTTP " + response.statusCode() + ": " + response.body());
-        JsonNode body = MAPPER.readTree(response.body());
-        node.check(body.path("protocolVersion").asInt() == 1
-                        && "OK".equals(body.path("status").asText())
-                        && "FLUSH".equals(body.path("operation").asText()), what,
-                "unexpected envelope " + body);
-        return body;
-    }
-
-    private static JsonNode awaitIdle(WalScenarioNode node) throws Exception {
-        JsonNode[] last = new JsonNode[1];
-        Await.until(() -> {
-            try {
-                last[0] = node.storageStatus();
-            } catch (Exception e) {
-                throw new AssertionError(ID + ": storage status failed while waiting for idle", e);
-            }
-            return "IDLE".equals(last[0].path("maintenance").path("phase").asText())
-                    && last[0].path("immutableMemtable").isNull();
-        }, IDLE_TIMEOUT, ID + ": maintenance did not become idle");
-        return last[0];
-    }
-
     private static void expectPublishedState(WalScenarioNode node, JsonNode status, long generation,
                                              List<Long> published, long target) throws IOException {
         JsonNode manifest = status.path("manifest");
@@ -215,20 +174,19 @@ public final class Cp1Fls001 {
         node.check(status.path("immutableMemtable").isNull(), "memtable",
                 "a frozen generation is still waiting: " + status.path("immutableMemtable"));
 
-        List<Long> listed = new ArrayList<>();
         for (JsonNode table : status.path("sstables")) {
-            listed.add(table.path("tableId").asLong());
             node.check(table.path("maxSequence").asLong()
                             <= manifest.path("flushedThroughSequence").asLong(), "manifest",
                     "table " + table.path("tableId") + " is above the high-water mark");
         }
+        List<Long> listed = tableIds(status);
         node.check(listed.equals(published), "manifest",
                 "manifest lists tables " + listed + ", the flush published " + published);
         node.check(manifest.path("sstableCount").asInt() == listed.size(), "manifest",
                 "sstableCount " + manifest.path("sstableCount") + " for " + listed.size() + " tables");
 
         Path sstDir = node.dataDir().resolve("lsm").resolve("sst");
-        List<String> expectedFiles = published.stream().map(Cp1Fls001::tableFile).sorted().toList();
+        List<String> expectedFiles = published.stream().map(FlushScenarioChecks::tableFile).sorted().toList();
         node.check(finalTables(sstDir).equals(expectedFiles), "sst directory",
                 "final tables " + finalTables(sstDir) + ", expected exactly " + expectedFiles);
 
@@ -249,31 +207,7 @@ public final class Cp1Fls001 {
     private static void expectReadsFromTables(WalScenarioNode node, ReferenceModel model,
                                               Set<String> keys, String when) throws Exception {
         long epoch = node.resetStats();
-        for (String key : keys.stream().sorted().toList()) {
-            byte[] expected = model.get(key);
-            Optional<byte[]> actual = node.get(key);
-            if (expected == null) {
-                node.check(actual.isEmpty(), "GET " + key + " " + when,
-                        "deleted key returned " + actual.map(Cp1Fls001::hex).orElse(""));
-            } else {
-                node.check(actual.isPresent() && Arrays.equals(expected, actual.get()),
-                        "GET " + key + " " + when,
-                        "value " + actual.map(Cp1Fls001::hex).orElse("<404>") + ", expected " + hex(expected));
-            }
-        }
-
-        JsonNode scan = node.scan(SCAN_START, SCAN_END, SCAN_LIMIT);
-        Map<String, byte[]> expected = model.scan(SCAN_START, SCAN_END, SCAN_LIMIT);
-        List<String> scannedKeys = new ArrayList<>();
-        for (JsonNode item : scan.path("items")) {
-            String key = item.path("key").asText();
-            scannedKeys.add(key);
-            byte[] value = Base64.getDecoder().decode(item.path("value").asText());
-            node.check(expected.containsKey(key) && Arrays.equals(expected.get(key), value),
-                    "SCAN " + when, "item " + key + "=" + hex(value) + " is not in the model");
-        }
-        node.check(scannedKeys.equals(new ArrayList<>(expected.keySet())), "SCAN " + when,
-                "keys " + scannedKeys + ", expected " + expected.keySet());
+        expectModel(node, model, keys, when);
 
         JsonNode stats = node.storageStatus().path("stats");
         node.check(stats.path("resetEpoch").asLong() == epoch, "counters " + when,
@@ -282,34 +216,9 @@ public final class Cp1Fls001 {
                 "reads did not load any SSTable data block");
     }
 
-    private static List<String> finalTables(Path sstDir) throws IOException {
-        try (Stream<Path> files = Files.list(sstDir)) {
-            return files.map(p -> p.getFileName().toString())
-                    .filter(name -> name.startsWith("sst-") && name.endsWith(".sst"))
-                    .sorted()
-                    .toList();
-        }
-    }
-
-    private static List<Long> ids(JsonNode array) {
-        List<Long> ids = new ArrayList<>();
-        for (JsonNode id : array) {
-            ids.add(id.asLong());
-        }
-        return ids;
-    }
-
-    static String tableFile(long tableId) {
-        return "sst-%020d.sst".formatted(tableId);
-    }
-
-    private static byte[] bytes(Random random, int length) {
+    static byte[] bytes(Random random, int length) {
         byte[] bytes = new byte[length];
         random.nextBytes(bytes);
         return bytes;
-    }
-
-    private static String hex(byte[] bytes) {
-        return bytes.length == 0 ? "<empty>" : HexFormat.of().formatHex(bytes);
     }
 }

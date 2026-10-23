@@ -35,7 +35,7 @@ class Cp1Fls001Test {
 
     @Test
     void tableFileNameHasTwentyDigits() {
-        assertEquals("sst-00000000000000000003.sst", Cp1Fls001.tableFile(3));
+        assertEquals("sst-00000000000000000003.sst", FlushScenarioChecks.tableFile(3));
     }
 
     @Test
