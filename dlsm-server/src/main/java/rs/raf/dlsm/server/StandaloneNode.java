@@ -17,6 +17,7 @@ import rs.raf.dlsm.failpoint.NoOpFailpoints;
 import rs.raf.dlsm.io.DefaultStorageIO;
 import rs.raf.dlsm.io.StorageIO;
 import rs.raf.dlsm.log.JsonLog;
+import rs.raf.dlsm.maintenance.CompactionJob;
 import rs.raf.dlsm.maintenance.FlushJob;
 import rs.raf.dlsm.maintenance.MaintenanceProgress;
 import rs.raf.dlsm.maintenance.MaintenanceWorker;
@@ -176,9 +177,12 @@ public final class StandaloneNode implements AutoCloseable {
 
     private FlushScheduler startMaintenance(MaintenanceHost host, RecoveryResult recovered,
                                             Failpoints failpoints, JsonLog log) {
+        MaintenanceProgress progress = new MaintenanceProgress();
         FlushJob flush = new FlushJob(layout, io, failpoints, stats, recovery.manifests(),
-                recovered.tableIds(), host, new MaintenanceProgress());
-        MaintenanceWorker worker = new MaintenanceWorker(host, recovery.manifests(), flush, log);
+                recovered.tableIds(), host, progress);
+        CompactionJob compaction = new CompactionJob(layout, io, failpoints, stats, recovery.manifests(),
+                recovered.tableIds(), host, progress);
+        MaintenanceWorker worker = new MaintenanceWorker(host, recovery.manifests(), flush, compaction, log);
         maintenance = worker;
         return worker;
     }
