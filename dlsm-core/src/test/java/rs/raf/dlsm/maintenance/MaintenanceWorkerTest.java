@@ -80,7 +80,8 @@ class MaintenanceWorkerTest {
         engine = Engine.open(new EngineConfig(EngineConfig.DEFAULT_MEMTABLE_MAX_BYTES, failpoints),
                 new RecoveredState(0, null, List.of(), wal.createSegment(ctx()), wal),
                 host -> worker = new MaintenanceWorker(host, manifests,
-                        new FlushJob(layout, io, failpoints, stats, manifests, tableIds, host, progress), log));
+                        new FlushJob(layout, io, failpoints, stats, manifests, tableIds, host, progress),
+                        new CompactionJob(layout, io, failpoints, stats, manifests, tableIds, host, progress), log));
     }
 
     @AfterEach

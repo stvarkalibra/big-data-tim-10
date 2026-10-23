@@ -97,6 +97,15 @@ class StandaloneNodeMaintenanceTest {
     }
 
     @Test
+    void compactIsNotReadyWhileNodeHasNoMaintenanceWorker() throws Exception {
+        HttpResponse<String> response = post(node.adminPort(), "/admin/v1/storage/compact", "{}");
+
+        assertEquals(503, response.statusCode(), response.body());
+        assertEquals("NODE_NOT_READY", MAPPER.readTree(response.body()).get("code").asText());
+        assertEquals(404, post(node.publicPort(), "/admin/v1/storage/compact", null).statusCode());
+    }
+
+    @Test
     void flushRejectsInvalidBody() throws Exception {
         HttpResponse<String> response = post(node.adminPort(), "/admin/v1/storage/flush", "{\"x\":1}");
 

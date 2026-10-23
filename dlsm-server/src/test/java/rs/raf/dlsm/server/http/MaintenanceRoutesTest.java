@@ -13,6 +13,7 @@ import rs.raf.dlsm.engine.RecoveredState;
 import rs.raf.dlsm.failpoint.NoOpFailpoints;
 import rs.raf.dlsm.io.DefaultStorageIO;
 import rs.raf.dlsm.log.JsonLog;
+import rs.raf.dlsm.maintenance.CompactionJob;
 import rs.raf.dlsm.maintenance.FlushJob;
 import rs.raf.dlsm.maintenance.MaintenanceProgress;
 import rs.raf.dlsm.maintenance.MaintenanceWorker;
@@ -66,12 +67,13 @@ class MaintenanceRoutesTest {
         JsonLog log = new JsonLog("test",
                 new PrintStream(new ByteArrayOutputStream(), true, StandardCharsets.UTF_8), Clock.systemUTC());
 
+        MaintenanceProgress progress = new MaintenanceProgress();
         InMemoryWal wal = new InMemoryWal();
         engine = Engine.open(new EngineConfig(EngineConfig.DEFAULT_MEMTABLE_MAX_BYTES, failpoints),
                 new RecoveredState(0, null, List.of(), wal.createSegment(ctx()), wal),
                 host -> worker = new MaintenanceWorker(host, manifests,
-                        new FlushJob(layout, io, failpoints, stats, manifests, tableIds, host,
-                                new MaintenanceProgress()), log));
+                        new FlushJob(layout, io, failpoints, stats, manifests, tableIds, host, progress),
+                        new CompactionJob(layout, io, failpoints, stats, manifests, tableIds, host, progress), log));
     }
 
     private Router router() {
@@ -81,26 +83,94 @@ class MaintenanceRoutesTest {
     }
 
     private ApiResponse flush(Router router, String body) throws Exception {
-        Router.Found found = assertInstanceOf(Router.Found.class,
-                router.match("POST", "/admin/v1/storage/flush"));
+        return post(router, "/admin/v1/storage/flush", body);
+    }
+
+    private ApiResponse compact(Router router, String body) throws Exception {
+        return post(router, "/admin/v1/storage/compact", body);
+    }
+
+    private ApiResponse post(Router router, String path, String body) throws Exception {
+        Router.Found found = assertInstanceOf(Router.Found.class, router.match("POST", path));
         byte[] bytes = body == null ? new byte[0] : body.getBytes(StandardCharsets.UTF_8);
-        return found.handler().handle(
-                ApiRequest.of("POST", "/admin/v1/storage/flush", Map.of(), null, bytes), ctx());
+        return found.handler().handle(ApiRequest.of("POST", path, Map.of(), null, bytes), ctx());
+    }
+
+    private void flushTable(String key, String value) throws Exception {
+        engine.put(key, value.getBytes(StandardCharsets.UTF_8), ctx());
+        assertEquals("PUBLISHED", flush(router(), null).body().get("result"));
     }
 
     @Test
     void onlyPostIsRouted() {
-        Router.MethodNotAllowed notAllowed = assertInstanceOf(Router.MethodNotAllowed.class,
-                router().match("GET", "/admin/v1/storage/flush"));
+        for (String path : List.of("/admin/v1/storage/flush", "/admin/v1/storage/compact")) {
+            Router.MethodNotAllowed notAllowed = assertInstanceOf(Router.MethodNotAllowed.class,
+                    router().match("GET", path));
 
-        assertEquals(Set.of("POST"), notAllowed.allowedMethods());
+            assertEquals(Set.of("POST"), notAllowed.allowedMethods());
+        }
     }
 
     @Test
     void notReadyWithoutWorker() {
-        StorageException e = assertThrows(StorageException.class, () -> flush(router(), null));
+        StorageException flushError = assertThrows(StorageException.class, () -> flush(router(), null));
+        StorageException compactError = assertThrows(StorageException.class, () -> compact(router(), null));
 
-        assertEquals(ErrorCode.NODE_NOT_READY, e.code());
+        assertEquals(ErrorCode.NODE_NOT_READY, flushError.code());
+        assertEquals(ErrorCode.NODE_NOT_READY, compactError.code());
+    }
+
+    @Test
+    void compactionNoOpHasExactFields() throws Exception {
+        startEngine();
+
+        ApiResponse empty = compact(router(), null);
+
+        assertEquals(200, empty.status());
+        assertEquals(List.of("protocolVersion", "status", "operation", "result", "inputTableIds",
+                "outputTableId", "manifestGeneration"), List.copyOf(empty.body().keySet()));
+        assertEquals(1, empty.body().get("protocolVersion"));
+        assertEquals("OK", empty.body().get("status"));
+        assertEquals("COMPACTION", empty.body().get("operation"));
+        assertEquals("NO_OP", empty.body().get("result"));
+        assertEquals(List.of(), empty.body().get("inputTableIds"));
+        assertTrue(empty.body().containsKey("outputTableId"));
+        assertNull(empty.body().get("outputTableId"));
+        assertEquals(0L, empty.body().get("manifestGeneration"));
+
+        flushTable("alpha", "A");
+        ApiResponse one = compact(router(), "{}");
+        assertEquals("NO_OP", one.body().get("result"));
+        assertEquals(List.of(1L), one.body().get("inputTableIds"));
+        assertNull(one.body().get("outputTableId"));
+        assertEquals(1L, one.body().get("manifestGeneration"));
+    }
+
+    @Test
+    void compactionPublishesReplacement() throws Exception {
+        startEngine();
+        flushTable("alpha", "A1");
+        flushTable("alpha", "A2");
+
+        ApiResponse response = compact(router(), null);
+
+        assertEquals(200, response.status());
+        assertEquals("PUBLISHED", response.body().get("result"));
+        assertEquals(List.of(1L, 2L), response.body().get("inputTableIds"));
+        assertEquals(3L, response.body().get("outputTableId"));
+        assertEquals(3L, response.body().get("manifestGeneration"));
+        assertEquals("A2", new String(engine.get("alpha", ctx()).value(), StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void compactionRejectsNonEmptyBody() throws Exception {
+        startEngine();
+        Router router = router();
+
+        for (String body : List.of("{\"x\":1}", "[]", "compact")) {
+            ApiException e = assertThrows(ApiException.class, () -> compact(router, body), body);
+            assertEquals(ErrorCode.INVALID_REQUEST, e.code());
+        }
     }
 
     @Test
