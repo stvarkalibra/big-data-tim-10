@@ -10,6 +10,7 @@ import rs.raf.dlsm.common.StorageException;
 import rs.raf.dlsm.engine.Engine;
 import rs.raf.dlsm.engine.EngineConfig;
 import rs.raf.dlsm.engine.FlushScheduler;
+import rs.raf.dlsm.engine.MaintenanceHost;
 import rs.raf.dlsm.engine.OpContext;
 import rs.raf.dlsm.failpoint.FailpointRegistry;
 import rs.raf.dlsm.log.JsonLog;
@@ -92,11 +93,12 @@ class RecoveryProcedureTest {
      * One start that opens the engine. No flush runs: the recovered
      * generation stays frozen, which is enough for these reads. (Mladen's
      * {@code InMemoryFlusher} numbers its tables from 1, which clashes with
-     * real tables from the manifest; the real worker allocates IDs.)
+     * real tables from the manifest; the real worker allocates IDs from
+     * {@link RecoveryResult#tableIds()}.)
      */
     private Engine start() throws Exception {
         Engine engine = procedure(NODE).openEngine(
-                new EngineConfig(MAX_BYTES, failpoints), host -> FlushScheduler.NONE, CTX);
+                new EngineConfig(MAX_BYTES, failpoints), (host, recovered) -> FlushScheduler.NONE, CTX);
         opened.add(engine);
         return engine;
     }
@@ -201,6 +203,50 @@ class RecoveryProcedureTest {
         assertEquals(List.of(WalFileNames.segmentFileName(3), WalFileNames.segmentFileName(4)),
                 names(layout.walDir()));
         assertEquals(5, engine.put("delta", new byte[]{1}, OpContext.withTimeout("t", 5_000)).sequence());
+    }
+
+    @Test
+    void maintenanceWorkerContinuesFromTheRecoveredState() throws Exception {
+        recover();
+        stop();
+        SSTableMeta table = writeTable(3, put("alpha", 1, "A1"));
+        publishManifest(1, table);
+        Files.write(layout.sstDir().resolve(SSTableMeta.fileName(7)), new byte[]{1});
+        writeSegment(2, segment(2, put("alpha", 1, "A1"), put("beta", 2, "B")));
+
+        List<MaintenanceHost> hosts = new ArrayList<>();
+        List<RecoveryResult> handedOver = new ArrayList<>();
+        List<String> calls = new ArrayList<>();
+        Engine engine = procedure(NODE).openEngine(new EngineConfig(MAX_BYTES, failpoints),
+                (host, recovered) -> {
+                    hosts.add(host);
+                    handedOver.add(recovered);
+                    return new FlushScheduler() {
+                        @Override
+                        public void flushNeeded() {
+                            calls.add("flushNeeded");
+                        }
+
+                        @Override
+                        public void checkAutoCompaction() {
+                            calls.add("checkAutoCompaction");
+                        }
+                    };
+                }, CTX);
+        opened.add(engine);
+
+        assertEquals(List.of(engine), hosts);
+        RecoveryResult recovered = handedOver.get(0);
+        assertEquals(1, recovered.manifest().flushedThroughSequence());
+        assertEquals(List.of(3L), recovered.manifest().sstables().stream()
+                .map(SSTableMeta::tableId).toList());
+        assertEquals(1, recovered.tables().size());
+        // Above the manifest and above orphan 7, which cleanup deleted: no ID is reused (CP1 §18.3).
+        assertEquals(8, recovered.tableIds().peek());
+        assertFalse(Files.exists(layout.sstDir().resolve(SSTableMeta.fileName(7))));
+        // The recovered generation (beta) goes to the worker right after READY (plan §6.2).
+        assertEquals(List.of("flushNeeded", "checkAutoCompaction"), calls);
+        assertEquals("B", text(engine, "beta"));
     }
 
     @Test

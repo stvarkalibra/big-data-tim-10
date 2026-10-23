@@ -34,7 +34,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
-import java.util.function.Function;
 
 /**
  * Startup recovery, CP1 §21.1 steps 1–15: prove the directory state from
@@ -57,6 +56,17 @@ public final class RecoveryProcedure implements AutoCloseable {
 
     private DataDirectory directory;
 
+    /**
+     * Creates the flush and compaction worker once the engine exists. The
+     * engine is the worker's {@link MaintenanceHost}; recovery hands over
+     * what the worker continues from, such as the manifest it loaded and the
+     * table ID allocator built before cleanup (CP1 §18.3).
+     */
+    @FunctionalInterface
+    public interface MaintenanceFactory {
+        FlushScheduler create(MaintenanceHost host, RecoveryResult recovered);
+    }
+
     public RecoveryProcedure(DataLayout layout, String nodeId, StorageIO io,
                              Failpoints failpoints, StorageStats stats, JsonLog log) {
         this.layout = Objects.requireNonNull(layout, "layout");
@@ -75,12 +85,11 @@ public final class RecoveryProcedure implements AutoCloseable {
      * worker right after (plan §6.2).
      *
      * @param maintenance creates the flush and compaction worker from the
-     *                    engine (its {@code MaintenanceHost})
+     *                    engine and the recovered state
      * @throws StorageException with a stable category when recovery must stop;
      *                          nothing became ready and the directory stays locked
      */
-    public Engine openEngine(EngineConfig config,
-                             Function<MaintenanceHost, FlushScheduler> maintenance,
+    public Engine openEngine(EngineConfig config, MaintenanceFactory maintenance,
                              OpContext ctx) throws IOException, StorageException {
 
         Objects.requireNonNull(config, "config");
@@ -88,7 +97,8 @@ public final class RecoveryProcedure implements AutoCloseable {
 
         RecoveryResult result = recover(config.memtableMaxBytes(), ctx);
         try {
-            return Engine.open(config, result.toRecoveredState(), maintenance);   // 15
+            return Engine.open(config, result.toRecoveredState(),
+                    host -> maintenance.create(host, result));                     // 15
         } catch (RuntimeException e) {
             result.wal().activeLog().close();
             throw e;

@@ -1,7 +1,9 @@
 package rs.raf.dlsm.server;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.file.Path;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -17,6 +19,41 @@ class ServerConfigTest {
         assertEquals(8082, config.adminPort());
         assertEquals(1_048_576, config.memtableMaxBytes());
         assertEquals(1_048_576, config.engineConfig().memtableMaxBytes());
+        assertEquals(Path.of("/var/lib/dlsm"), config.dataDir());
+        assertEquals(Path.of("/var/lib/dlsm"), ServerConfig.onPorts(0, 0).dataDir());
+    }
+
+    @Test
+    void readsDataDir(@TempDir Path dir) {
+        ServerConfig config = ServerConfig.fromEnv(Map.of("DLSM_DATA_DIR", dir.toString()));
+
+        assertEquals(dir, config.dataDir());
+    }
+
+    @Test
+    void rejectsBadDataDirNamingTheVariable() {
+        for (String value : new String[] {"", " ", " /var/lib/dlsm", "/var/lib/dlsm\n", "a\0b"}) {
+            IllegalArgumentException e = assertThrows(
+                    IllegalArgumentException.class,
+                    () -> ServerConfig.fromEnv(Map.of("DLSM_DATA_DIR", value)),
+                    value);
+            assertTrue(e.getMessage().contains("DLSM_DATA_DIR"));
+        }
+        assertThrows(IllegalArgumentException.class,
+                () -> ServerConfig.onPorts(0, 0).withDataDir(Path.of("")));
+        assertThrows(IllegalArgumentException.class,
+                () -> ServerConfig.onPorts(0, 0).withDataDir(null));
+    }
+
+    @Test
+    void withersKeepTheOtherSettings(@TempDir Path dir) {
+        ServerConfig config = ServerConfig.fromEnv(Map.of(
+                "NODE_ID", "storage-1", "DLSM_PUBLIC_PORT", "0", "DLSM_ADMIN_PORT", "0",
+                "MEMTABLE_MAX_BYTES", "4096"));
+
+        ServerConfig moved = config.withTestMode(true).withDataDir(dir);
+        assertEquals(new ServerConfig("storage-1", 0, 0, 4096, true, dir), moved);
+        assertEquals(dir, moved.withTestMode(false).dataDir());
     }
 
     @Test

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import rs.raf.dlsm.log.JsonLog;
 
 import java.io.ByteArrayOutputStream;
@@ -13,6 +14,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.time.Clock;
 import java.util.Base64;
 import java.util.concurrent.TimeUnit;
@@ -28,12 +30,16 @@ class StandaloneNodeStatusTest {
     private StandaloneNode node;
     private int requestNumber;
 
+    @TempDir
+    Path dataDir;
+
     private void start(long memtableMaxBytes) throws Exception {
         JsonLog log = new JsonLog("standalone",
                 new PrintStream(new ByteArrayOutputStream(), true, StandardCharsets.UTF_8),
                 Clock.systemUTC());
         node = StandaloneNode.start(
-                new ServerConfig("standalone", 0, 0, memtableMaxBytes), log);
+                new ServerConfig("standalone", 0, 0, memtableMaxBytes).withDataDir(dataDir), log,
+                WindowsSafeStorageIO::new);
     }
 
     @AfterEach
@@ -123,7 +129,7 @@ class StandaloneNodeStatusTest {
 
     @Test
     void flushedTablesAppearConsistently() throws Exception {
-        // Tiny generations: writes rotate and the in-memory flush publishes tables.
+        // Tiny generations: writes rotate and the maintenance worker publishes tables.
         start(256);
         for (int i = 0; i < 40; i++) {
             put("key" + i, "value" + i);

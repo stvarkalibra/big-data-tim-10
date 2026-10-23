@@ -2,6 +2,8 @@ package rs.raf.dlsm.server;
 
 import rs.raf.dlsm.engine.EngineConfig;
 
+import java.nio.file.InvalidPathException;
+import java.nio.file.Path;
 import java.util.Map;
 import java.util.Objects;
 
@@ -15,25 +17,29 @@ import java.util.Objects;
  *   <li>{@code MEMTABLE_MAX_BYTES} — MemTable rotation threshold, default
  *       1 MiB (CP1 §10);</li>
  *   <li>{@code TEST_MODE} — {@code true} enables failpoints and other
- *       state-changing test controls (PI §16.6), default {@code false}.</li>
+ *       state-changing test controls (PI §16.6), default {@code false};</li>
+ *   <li>{@code DLSM_DATA_DIR} — the node's durable data directory, default
+ *       {@code /var/lib/dlsm} (CP1 §14).</li>
  * </ul>
  *
- * <p>The graded ports are fixed (PI §17.1); the port overrides exist so the
- * test harness can run several child processes side by side. Port 0 asks
- * the OS for a free port.
+ * <p>The graded ports and data directory are fixed (PI §17.1, CP1 §14); the
+ * overrides exist so the test harness can run several child processes side
+ * by side, each over its own volume. Port 0 asks the OS for a free port.
  */
 public record ServerConfig(String nodeId, int publicPort, int adminPort,
-                           long memtableMaxBytes, boolean testMode) {
+                           long memtableMaxBytes, boolean testMode, Path dataDir) {
 
     public static final String NODE_ID = "NODE_ID";
     public static final String PUBLIC_PORT = "DLSM_PUBLIC_PORT";
     public static final String ADMIN_PORT = "DLSM_ADMIN_PORT";
     public static final String MEMTABLE_MAX_BYTES = "MEMTABLE_MAX_BYTES";
     public static final String TEST_MODE = "TEST_MODE";
+    public static final String DATA_DIR = "DLSM_DATA_DIR";
 
     public static final String DEFAULT_NODE_ID = "standalone";
     public static final int DEFAULT_PUBLIC_PORT = 8080;
     public static final int DEFAULT_ADMIN_PORT = 8082;
+    public static final Path DEFAULT_DATA_DIR = Path.of("/var/lib/dlsm");
 
     public ServerConfig {
         if (!isValidNodeId(nodeId)) {
@@ -48,11 +54,14 @@ public record ServerConfig(String nodeId, int publicPort, int adminPort,
         if (memtableMaxBytes < 1) {
             throw new IllegalArgumentException("Invalid " + MEMTABLE_MAX_BYTES);
         }
+        if (dataDir == null || dataDir.toString().isEmpty()) {
+            throw new IllegalArgumentException("Invalid " + DATA_DIR);
+        }
     }
 
-    /** Outside test mode. */
+    /** Outside test mode, over the default data directory. */
     public ServerConfig(String nodeId, int publicPort, int adminPort, long memtableMaxBytes) {
-        this(nodeId, publicPort, adminPort, memtableMaxBytes, false);
+        this(nodeId, publicPort, adminPort, memtableMaxBytes, false, DEFAULT_DATA_DIR);
     }
 
     /** Defaults for everything except the ports, e.g. for tests on port 0. */
@@ -70,12 +79,18 @@ public record ServerConfig(String nodeId, int publicPort, int adminPort,
                 (int) number(env, ADMIN_PORT, DEFAULT_ADMIN_PORT, 5),
                 number(env, MEMTABLE_MAX_BYTES,
                         EngineConfig.DEFAULT_MEMTABLE_MAX_BYTES, 18),
-                flag(env, TEST_MODE));
+                flag(env, TEST_MODE),
+                path(env, DATA_DIR, DEFAULT_DATA_DIR));
     }
 
     /** Same settings with test mode switched on or off. */
     public ServerConfig withTestMode(boolean enabled) {
-        return new ServerConfig(nodeId, publicPort, adminPort, memtableMaxBytes, enabled);
+        return new ServerConfig(nodeId, publicPort, adminPort, memtableMaxBytes, enabled, dataDir);
+    }
+
+    /** Same settings over another data directory, e.g. a test's temporary one. */
+    public ServerConfig withDataDir(Path dir) {
+        return new ServerConfig(nodeId, publicPort, adminPort, memtableMaxBytes, testMode, dir);
     }
 
     public EngineConfig engineConfig() {
@@ -92,6 +107,25 @@ public record ServerConfig(String nodeId, int publicPort, int adminPort,
             return true;
         }
         throw new IllegalArgumentException("Invalid " + name + " (expected true or false)");
+    }
+
+    /**
+     * Any path the OS accepts, taken as written; empty or with surrounding
+     * whitespace is a configuration error rather than a silent other directory.
+     */
+    private static Path path(Map<String, String> env, String name, Path fallback) {
+        String text = env.get(name);
+        if (text == null) {
+            return fallback;
+        }
+        if (text.isEmpty() || !text.equals(text.strip())) {
+            throw new IllegalArgumentException("Invalid " + name);
+        }
+        try {
+            return Path.of(text);
+        } catch (InvalidPathException e) {
+            throw new IllegalArgumentException("Invalid " + name);
+        }
     }
 
     /** Plain decimal digits; the digit limit keeps parsing overflow-free. */

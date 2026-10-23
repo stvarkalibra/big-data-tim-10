@@ -11,9 +11,11 @@ import java.util.Map;
  *
  * <ul>
  *   <li>No arguments: run the standalone node. Configuration errors exit
- *       with code 2 and startup failures with code 1, before any request
- *       is served. There is no shutdown hook: durability never depends on
- *       a clean shutdown (CP1 §3).</li>
+ *       with code 2 and a server that cannot bind with code 1, before any
+ *       request is served. A failed recovery does not exit: the node stays
+ *       up as {@code FAILED} so its diagnostic can be read (CP1 §21.4).
+ *       There is no shutdown hook: durability never depends on a clean
+ *       shutdown (CP1 §3).</li>
  *   <li>{@code inspect ...}: offline inspection for {@code dbctl}
  *       (CP1 §25); see {@link InspectCommand}. Nothing else is started.</li>
  * </ul>

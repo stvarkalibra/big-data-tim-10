@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import rs.raf.dlsm.log.JsonLog;
 
 import java.io.ByteArrayOutputStream;
@@ -14,6 +15,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.time.Clock;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -33,12 +35,16 @@ class StandaloneNodeApiTest {
     private StandaloneNode node;
     private int requestNumber;
 
+    @TempDir
+    Path dataDir;
+
     @BeforeEach
     void start() throws Exception {
         JsonLog log = new JsonLog("standalone",
                 new PrintStream(new ByteArrayOutputStream(), true, StandardCharsets.UTF_8),
                 Clock.systemUTC());
-        node = StandaloneNode.start(ServerConfig.onPorts(0, 0), log);
+        node = StandaloneNode.start(ServerConfig.onPorts(0, 0).withDataDir(dataDir), log,
+                WindowsSafeStorageIO::new);
     }
 
     @AfterEach
@@ -177,7 +183,8 @@ class StandaloneNodeApiTest {
         JsonLog log = new JsonLog("standalone",
                 new PrintStream(new ByteArrayOutputStream(), true, StandardCharsets.UTF_8),
                 Clock.systemUTC());
-        node = StandaloneNode.start(new ServerConfig("standalone", 0, 0, 256), log);
+        node = StandaloneNode.start(new ServerConfig("standalone", 0, 0, 256).withDataDir(dataDir),
+                log, WindowsSafeStorageIO::new);
 
         for (int i = 0; i < 100; i++) {
             put("key" + i, "value" + i);
