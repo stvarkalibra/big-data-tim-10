@@ -6,6 +6,7 @@ import rs.raf.dlsm.scenarios.Cp1Api003;
 import rs.raf.dlsm.scenarios.Cp1Api004;
 import rs.raf.dlsm.scenarios.Cp1Api005;
 import rs.raf.dlsm.scenarios.Cp1Cmp001;
+import rs.raf.dlsm.scenarios.Cp1Cmp002;
 import rs.raf.dlsm.scenarios.Cp1Cmp005;
 import rs.raf.dlsm.scenarios.Cp1Fls001;
 import rs.raf.dlsm.scenarios.Cp1Fls002;
@@ -78,6 +79,7 @@ public final class ScenarioRegistry {
         register(Cp1Fls006.ID, Cp1Fls006::run);
         register(Cp1Fls007.ID, Cp1Fls007::run);
         register(Cp1Cmp001.ID, Cp1Cmp001::run);
+        register(Cp1Cmp002.ID, Cp1Cmp002::run);
         register(Cp1Cmp005.ID, Cp1Cmp005::run);
     }
 
