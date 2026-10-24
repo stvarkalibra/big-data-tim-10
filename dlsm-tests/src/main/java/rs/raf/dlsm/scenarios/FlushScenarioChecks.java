@@ -3,9 +3,13 @@ package rs.raf.dlsm.scenarios;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import rs.raf.dlsm.harness.Await;
+import rs.raf.dlsm.inspect.InspectSSTableCommand;
 import rs.raf.dlsm.model.ReferenceModel;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.PrintStream;
+import java.nio.charset.StandardCharsets;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -57,6 +61,39 @@ final class FlushScenarioChecks {
                         && "FLUSH".equals(body.path("operation").asText()), what,
                 "unexpected envelope " + body);
         return body;
+    }
+
+    static HttpResponse<String> postCompact(int adminPort, String requestId) throws Exception {
+        return HTTP.send(HttpRequest.newBuilder(
+                        URI.create("http://localhost:" + adminPort + "/admin/v1/storage/compact"))
+                        .header("X-Request-Id", requestId)
+                        .header("X-Request-Timeout-Ms", Long.toString(WalScenarioNode.TIMEOUT_MS))
+                        .POST(HttpRequest.BodyPublishers.ofString("{}"))
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+    }
+
+    static JsonNode compact(WalScenarioNode node, int adminPort, String what) throws Exception {
+        String requestId = node.nextRequestId();
+        HttpResponse<String> response = postCompact(adminPort, requestId);
+        node.check(response.statusCode() == 200, what + " (" + requestId + ")",
+                "HTTP " + response.statusCode() + ": " + response.body());
+        JsonNode body = MAPPER.readTree(response.body());
+        node.check(body.path("protocolVersion").asInt() == 1
+                        && "OK".equals(body.path("status").asText())
+                        && "COMPACTION".equals(body.path("operation").asText()), what,
+                "unexpected envelope " + body);
+        return body;
+    }
+
+    static JsonNode inspect(WalScenarioNode node, long tableId) throws IOException {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        int exit = InspectSSTableCommand.run(node.dataDir(), tableId,
+                new PrintStream(out, true, StandardCharsets.UTF_8));
+        String json = out.toString(StandardCharsets.UTF_8);
+        node.check(exit == InspectSSTableCommand.EXIT_OK, "inspect sstable " + tableId,
+                "exit " + exit + ": " + json);
+        return MAPPER.readTree(json);
     }
 
     static JsonNode awaitIdle(WalScenarioNode node, String scenarioId) {
