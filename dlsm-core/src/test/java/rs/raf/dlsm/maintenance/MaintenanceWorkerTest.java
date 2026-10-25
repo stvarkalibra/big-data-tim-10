@@ -15,7 +15,7 @@ import rs.raf.dlsm.engine.RecoveredState;
 import rs.raf.dlsm.failpoint.FailpointNames;
 import rs.raf.dlsm.failpoint.FailpointRegistry;
 import rs.raf.dlsm.failpoint.FailpointRegistry.Action;
-import rs.raf.dlsm.io.DefaultStorageIO;
+import rs.raf.dlsm.wal.RecordingStorageIO;
 import rs.raf.dlsm.log.JsonLog;
 import rs.raf.dlsm.manifest.Manifest;
 import rs.raf.dlsm.manifest.ManifestManager;
@@ -67,7 +67,7 @@ class MaintenanceWorkerTest {
             Files.createDirectories(dir);
         }
         failpoints = new FailpointRegistry(true);
-        DefaultStorageIO io = new DefaultStorageIO(failpoints);
+        RecordingStorageIO io = new RecordingStorageIO(failpoints);
         stats = new StorageStats();
         manifests = new ManifestManager(layout, io);
         manifests.publishInitialManifest(ctx());
@@ -80,7 +80,8 @@ class MaintenanceWorkerTest {
         engine = Engine.open(new EngineConfig(EngineConfig.DEFAULT_MEMTABLE_MAX_BYTES, failpoints),
                 new RecoveredState(0, null, List.of(), wal.createSegment(ctx()), wal),
                 host -> worker = new MaintenanceWorker(host, manifests,
-                        new FlushJob(layout, io, failpoints, stats, manifests, tableIds, host, progress), log));
+                        new FlushJob(layout, io, failpoints, stats, manifests, tableIds, host, progress),
+                        new CompactionJob(layout, io, failpoints, stats, manifests, tableIds, host, progress), log));
     }
 
     @AfterEach

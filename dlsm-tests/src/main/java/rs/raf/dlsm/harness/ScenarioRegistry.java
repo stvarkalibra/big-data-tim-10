@@ -1,7 +1,22 @@
 package rs.raf.dlsm.harness;
 
+import rs.raf.dlsm.scenarios.Cp1Api001;
+import rs.raf.dlsm.scenarios.Cp1Api002;
 import rs.raf.dlsm.scenarios.Cp1Api003;
+import rs.raf.dlsm.scenarios.Cp1Api004;
+import rs.raf.dlsm.scenarios.Cp1Api005;
+import rs.raf.dlsm.scenarios.Cp1Cmp001;
+import rs.raf.dlsm.scenarios.Cp1Cmp002;
+import rs.raf.dlsm.scenarios.Cp1Cmp003;
+import rs.raf.dlsm.scenarios.Cp1Cmp004;
+import rs.raf.dlsm.scenarios.Cp1Cmp005;
+import rs.raf.dlsm.scenarios.Cp1Fls001;
 import rs.raf.dlsm.scenarios.Cp1Fls002;
+import rs.raf.dlsm.scenarios.Cp1Fls003;
+import rs.raf.dlsm.scenarios.Cp1Fls004;
+import rs.raf.dlsm.scenarios.Cp1Fls005;
+import rs.raf.dlsm.scenarios.Cp1Fls006;
+import rs.raf.dlsm.scenarios.Cp1Fls007;
 import rs.raf.dlsm.scenarios.Cp1Mdl001;
 import rs.raf.dlsm.scenarios.Cp1Sst006;
 import rs.raf.dlsm.scenarios.Cp1Sst001;
@@ -46,7 +61,11 @@ public final class ScenarioRegistry {
     private static final Map<String, RunnableScenario> implemented = new HashMap<>();
 
     static {
+        register(Cp1Api001.ID, Cp1Api001::run);
+        register(Cp1Api002.ID, Cp1Api002::run);
         register(Cp1Api003.ID, Cp1Api003::run);
+        register(Cp1Api004.ID, Cp1Api004::run);
+        register(Cp1Api005.ID, Cp1Api005::run);
         register(Cp1Sst006.ID, Cp1Sst006::run);
         register("CP1-MDL-001", Cp1Mdl001::run);
         register(Cp1Sst001.ID, Cp1Sst001::run);
@@ -54,7 +73,18 @@ public final class ScenarioRegistry {
         register(Cp1Sst003.ID, Cp1Sst003::run);
         register(Cp1Sst004.ID, Cp1Sst004::run);
         register(Cp1Sst005.ID, Cp1Sst005::run);
+        register(Cp1Fls001.ID, Cp1Fls001::run);
         register(Cp1Fls002.ID, Cp1Fls002::run);
+        register(Cp1Fls003.ID, Cp1Fls003::run);
+        register(Cp1Fls004.ID, Cp1Fls004::run);
+        register(Cp1Fls005.ID, Cp1Fls005::run);
+        register(Cp1Fls006.ID, Cp1Fls006::run);
+        register(Cp1Fls007.ID, Cp1Fls007::run);
+        register(Cp1Cmp001.ID, Cp1Cmp001::run);
+        register(Cp1Cmp002.ID, Cp1Cmp002::run);
+        register(Cp1Cmp003.ID, Cp1Cmp003::run);
+        register(Cp1Cmp004.ID, Cp1Cmp004::run);
+        register(Cp1Cmp005.ID, Cp1Cmp005::run);
     }
 
     private ScenarioRegistry() {

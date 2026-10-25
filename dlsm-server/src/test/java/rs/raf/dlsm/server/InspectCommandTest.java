@@ -136,7 +136,7 @@ class InspectCommandTest {
         for (List<String> args : List.of(
                 List.<String>of(),
                 List.of("waL"),
-                List.of("manifest"),
+                List.of("manifest", "extra"),
                 List.of("wal", "--data-dir"),
                 List.of("wal", "--dir", "x"),
                 List.of("wal", "--data-dir", "x", "extra"),

@@ -90,6 +90,43 @@ Gotovo sav kod i testovi iz Mladenovih grana nastali su u radu sa AI alatom, com
 
 ---
 
+## Ilija — manifest, flush, compaction i održavanje
+
+### Alati
+
+- **Claude Code** (desktop aplikacija, model Claude Opus 5.5): čitanje specifikacije, pisanje koda i testova po koracima, provera build-a i scenarija nad pravim čvorom.
+
+### Šta je nastalo uz AI pomoć
+
+| Grana | Komponente |
+|---|---|
+| `ilija/manifest-model` | `Manifest`, `ManifestValidator`, `ManifestManager`, `ManifestPublishException`, `TableIdAllocator`, `FORMAT.md` §5 |
+| `ilija/flush` | `FlushJob`, `MaintenanceWorker`, `MaintenanceProgress`, ruta `/admin/v1/storage/flush` |
+| `ilija/compaction`, `ilija/compaction-corruption` | `CompactionJob`, automatski okidač, ruta `/admin/v1/storage/compact`, oštećen ulaz vodi u `FAILED` |
+| `ilija/fix-worker-wiring`, `ilija/windows-tests` | radnik sa compaction-om u čvoru, testovi kroz `RecordingStorageIO` / `WindowsSafeStorageIO` |
+| `ilija/status-and-decisions` | `maintenance.lastError` u statusu, redovi u `docs/ODLUKE.md` |
+| `ilija/inspect-manifest` | `InspectManifest` (`inspect manifest`), `FORMAT.md` §5.5 |
+| `ilija/scenario-fls-001`, `003` do `006` | `FlushScenarioChecks` i scenariji CP1-FLS-001, 003, 004, 005, 006 |
+| `ilija/scenario-cmp-001` do `004` | scenariji CP1-CMP-001, 002, 003, 004 |
+| `ilija/design-maintenance` | `DESIGN.md` §6, uređivanje §3.1 i §10 |
+
+### Kako je rad pregledan i proveren
+
+- **Specifikacija pre koda.** Za svaki deo AI je prvo čitao odeljak CP1 (§18–§20, §23, §24, §26.1, §29.3, §29.5) i plan §6.4.
+- **Mali commit-ovi, pregled pre svakog.** Grana se pravi pre rada, svaki deo je jedna celina.
+- **Testovi uz svaki deo.** Unit testovi nad pravim `Engine`-om i pravim SSTable fajlovima, sa `IO_ERROR` na svakoj granici objave i ponovnim pokušajem; testovi radnika za ugovor ručnog flush-a i compaction-a, istek roka i serijalizaciju.
+- **Scenariji nad pravim procesom.** Svaki scenario je pokrenut nad pravim server jar-om sa više seed-ova, a zatim je jedan oracle namerno pokvaren da se potvrdi da test zaista pada. Oracle-i ne koriste produkcioni kod: logičko stanje je iz `ReferenceModel`-a, a fizičko iz statusa, inspektora i fajlova na disku.
+- **Windows.** Testovi su pokrenuti i u simulaciji Windows-a (`os.name`), gde se preskače samo force direktorijuma.
+- **Odluke zapisane.** Svaki izbor koji spec ne fiksira je u `docs/ODLUKE.md`.
+
+### Poznate slabosti i otvorena pitanja
+
+- **Bootstrap failpoint-i (CP1 §26.3) ne postoje.** Automatski flush posle restarta ne može da se zaustavi, pa FLS-003 i FLS-005 prihvataju oba dozvoljena krajnja stanja.
+- **FLS-006 grana „stari manifest“ nije izvršena.** Pad procesa ne briše keš OS-a, pa oporavak uvek zatiče nov manifest.
+- **Za potvrdu kod asistenta:** stroga provera nepoznatih polja manifesta i tumačenje provere high-water mark-a, `READY` posle greške pri brisanju WAL-a i polje `maintenance.lastError` (`docs/ODLUKE.md`).
+
+---
+
 ## Kimi — SSTable, statistike, status i logovi
 
 ### Alati

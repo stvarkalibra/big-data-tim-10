@@ -11,7 +11,7 @@ Urednik fajla je Ilija (plan §15); svaki odeljak piše vlasnik dela sistema.
 | vlasništvo nad bravama i redosled brava | §3 | Mladen | popunjeno |
 | MemTable rotacija i backpressure | §4 | Mladen | popunjeno |
 | algoritmi čitanja i spajanja skeniranja | §5 | Mladen, Kimi (SSTable) | engine deo popunjen |
-| objavljivanje pri flush-u i compaction-u | §6 | Ilija | čeka |
+| objavljivanje pri flush-u i compaction-u | §6 | Ilija | popunjeno |
 | oporavak i politika oštećenja | §7 | Matej | popunjeno |
 | status i brojači | §8 | Kimi | čeka |
 | failpoint-i i arhitektura testova | §9 | Andrija | čeka |
@@ -94,7 +94,7 @@ Dizajn je preporučena osnova iz CP1 §13.1: jedna pravedna `ReentrantReadWriteL
 
 | Brava | Vrsta | Ko je drži | Šta štiti |
 |---|---|---|---|
-| `maintenanceLock` | `ReentrantLock` (održavanje) | flush ili compaction posao, ceo posao | serijalizuje održavanje; nikad je ne uzima klijentski zahtev |
+| `maintenanceLock` | jedna nit `MaintenanceWorker`-a (jednonitni `ExecutorService`, §6.2) | flush ili compaction posao, ceo posao | serijalizuje održavanje; nikad je ne uzima klijentski zahtev |
 | `engineLock` (write) | pravedna `ReentrantReadWriteLock` | `PUT`/`DELETE` (koraci 3–8), rotacija, objava rezultata održavanja (`underEngineWriteLock`) | aktivni par (MemTable, WAL segment), alokator, `EngineView`, prelaze režima |
 | `engineLock` (read) | ista | `GET`, ceo `SCAN`, `Engine.status`, `maxSequenceInEngine`, `underEngineReadLock` | stabilan pogled na sve izvore tokom čitanja |
 | `rotationSlotFree` | `Condition` vezan za write lock | pisac pod backpressure-om | čekanje na slobodan slot za zamrznutu generaciju |
@@ -195,16 +195,85 @@ Validacija cele tabele pri pokretanju (`SSTableValidator.validateFully`) je odvo
 
 ## 6. Objavljivanje pri flush-u i compaction-u
 
-> **Piše Ilija** (CP1 §19, §20, §23).
+> **Piše Ilija** (CP1 §18–§20, §23, §26.1). Kod je u paketima `manifest` i `maintenance`; format manifesta je u `FORMAT.md` §5.
 
-Engine strana je ugovor `MaintenanceHost` (javadoc u kodu sadrži redosled koraka):
+Jedna rečenica nosi ceo odeljak: **finalizacija čini fajl kompletnim, a tek zamena manifesta čini ga delom baze** (I4). Zato flush i compaction imaju isti oblik: izlaz se piše i trajno finalizuje van engine brave, a jedina tačka u kojoj se stanje baze menja je `ManifestManager.publish` pod engine write lock-om. Ništa se ne briše pre nego što je ta objava trajna.
 
-- flush uzima `oldestImmutable()`, piše tabelu **van** engine brave, pa u `underEngineWriteLock` objavljuje manifest i poziva `installFlushResult(generacija, tabela)`, koji u jednoj zameni pogleda povlači zamrznutu generaciju i dodaje tabelu, pa budi pisce;
-- compaction bira ulaze iz `currentView()`, spaja ih `MergingIterator`-om van brave, pa u `underEngineWriteLock` proverava da su ulazi i dalje objavljeni, objavljuje manifest i poziva `installCompactionResult(ulazi, izlaz)`;
-- pošto čitanja drže read lock, posle povratka iz objave nijedan čitalac ne koristi stare ulaze i njihovi fajlovi smeju da se obrišu;
-- greška posle preimenovanja manifesta prijavljuje se kroz `reportFatalError` (CP1 §26.1).
+### 6.1 Manifest i atomska objava (`ManifestManager`)
 
-Testovi `EngineMaintenanceTest` i `EngineDiskMaintenanceTest` pokazuju tačan redosled poziva.
+| CP1 §18.1 | Kod | Šta je bitno |
+|---|---|---|
+| 1 | `publish(base -> …)` | izmena se računa nad **trenutnim** manifestom u memoriji (rebase), generacija je tačno `+1`; kandidat prolazi `ManifestValidator` i proveru da `nextTableId` i `flushedThroughSequence` ne opadaju, pa se neispravan kandidat odbija pre ikakvog upisa |
+| 1–2 | `write` | zaostali `tmp/MANIFEST-<generacija>.tmp` se briše, upiše se ceo nov manifest i nad njim force |
+| 3 | `atomicReplace` | failpoint `manifest.after-temp-sync.before-rename`, pa `ATOMIC_MOVE` + `REPLACE_EXISTING` preko `lsm/MANIFEST.json` |
+| 4 | `fsyncDirectory(lsm/)` | failpoint `manifest.after-rename.before-directory-sync`, pa force direktorijuma |
+| 5 | `current = next` | pogled u memoriji se menja tek posle koraka 4; brisanje WAL-a ili ulaza radi pozivalac, posle povratka |
+
+- Objave su serijalizovane (`synchronized`), pa dve nikad ne idu istovremeno.
+- Greška pre preimenovanja daje `ManifestPublishException` sa `renamed() == false`: stari manifest važi, privremeni fajl je obrisan. Greška u koraku 4 daje `renamed() == true`: na disku je možda nov manifest, pa pozivalac mora da prevede mehanizam u `FAILED` (CP1 §26.1), a pogled u memoriji ostaje stari.
+- `loadAndValidate` za oporavak čita manifest strogo (`FORMAT.md` §5.2). `publishInitialManifest` je Matejev `ManifestInitializer` za korak 3 prve inicijalizacije.
+- `TableIdAllocator.fromDisk` računa `max(manifest.nextTableId, 1 + najveći ID u sst/ ili tmp/)` **pre** čišćenja (CP1 §18.3), pa ID orphan-a ili privremenog izlaza nikad ne dobije nova tabela. Svaka objava upisuje `nextTableId = max(prethodni, sledeći ID alokatora)`.
+
+### 6.2 Radnik održavanja i `maintenanceLock` (`MaintenanceWorker`)
+
+`maintenanceLock` iz §3 je **jedna nit** radnika (jednonitni `ExecutorService`), a ne zaseban objekat brave: svaki posao održavanja, ručni ili automatski, izvršava se na toj niti, pa se flush i compaction nikad ne preklapaju (RECOMMENDED BASELINE iz CP1 §20.1, §23; nema `409 MAINTENANCE_CONFLICT`). Engine bravu posao uzima samo kroz `MaintenanceHost`, pa redosled ostaje `maintenanceLock → engineLock`.
+
+| Posao | Ko ga pokreće | Pravilo |
+|---|---|---|
+| automatski flush | `flushNeeded()` posle rotacije (engine je pod write lock-om) | samo stavi posao u red i vrati se; ako je flush već u redu, ne dodaje drugi |
+| ručni flush | `POST /admin/v1/storage/flush` → `flush(ctx)` | CP1 §23.1: uhvati `targetSequence = maxSequenceInEngine`, pa redom flush postojeće zamrznute generacije i rotacija aktivne dok `flushedThroughSequence < target`; `PUBLISHED` ili `NO_OP` |
+| automatski compaction | `checkAutoCompaction()` posle oporavka, posle svake objave flush-a i compaction-a | u red ide samo ako je objavljeno ≥ 4 tabele i nijedan automatski compaction nije u redu ni u toku; po završetku se proverava ponovo |
+| ručni compaction | `POST /admin/v1/storage/compact` → `compact(ctx)` | ≥ 2 tabele, inače `NO_OP` sa viđenim ID-jem (ili bez njega) |
+
+- Ručni poziv čeka do roka zahteva. Ako rok istekne, vraća `DEADLINE_EXCEEDED`, a prihvaćeni posao se ipak završi u pozadini (CP1 §23).
+- Svaka greška posla se loguje (`MAINTENANCE_FAILED`), čuva u `lastError()` i pokazuje u statusu kao `maintenance.lastError` (`code`, `message`). Automatski posao se posle greške ne ponavlja sam; sledeći okidač (rotacija, objava, ručni poziv) pokušava ponovo.
+- `MaintenanceProgress` drži `operation`, `phase`, `targetSequence` i `inputTableIds` za status (CP1 §24). Faze idu `CAPTURE → WRITE_OUTPUT → FINALIZE_OUTPUT → PUBLISH_MANIFEST → RETIRE_INPUTS → IDLE`, a pri neuspehu `CLEANUP`. `SYNC_OUTPUT` se ne prijavljuje zasebno, jer force i preimenovanje izlaza radi jedan poziv Kimijevog `SSTableDiskWriter`-a.
+
+### 6.3 Flush (`FlushJob.flushOldest`, CP1 §19.1)
+
+| Korak | Kod | Šta je bitno |
+|---:|---|---|
+| 1 | `MaintenanceWorker.manualFlush` | ručni flush rotira aktivnu generaciju (`rotateIfActiveContainsUpTo`) tek kad nema zamrznute; automatski flush radi samo nad već zamrznutom |
+| 2 | `host.oldestImmutable()` | FIFO; u CP1 postoji najviše jedna zamrznuta generacija, a oporavljenu može da štiti više segmenata |
+| 3 | `tableIds.next()` | `flushAttempts++` |
+| 4–8 | `SSTableDiskWriter.writeAndFinalize` (Kimi) | piše `tmp/sst-<id>.sst.tmp` strimovanjem, validira ga, force, `atomicMoveNoReplace` u `sst/`, force `sst/`; tombstone-i ulaze kao zapisi |
+| — | failpoint, `DiskSSTableTableSource.open` | `flush.after-sstable-finalize.before-manifest`; izlaz se otvara i ponovo validira **pre** objave |
+| 9–10 | `underEngineWriteLock` → `manifests.publish` | proveri da je ista generacija i dalje najstarija; rebase: dodaj tabelu, `flushedThroughSequence = max(prethodni, maxSequence generacije)` |
+| 11 | `installFlushResult` | u istoj zameni pogleda povlači generaciju i dodaje tabelu, budi pisce; `flushPublications++` |
+| 12–13 | `retireWal` | failpoint `flush.after-manifest-publish.before-wal-delete`, brisanje segmenata te generacije (`FlushInput.walSegmentIds`, svi su `≤` nove granice), force `wal/` |
+
+Posle povratka iz koraka 11 nijedan čitalac ne koristi zamrznutu generaciju, jer čitanja drže read lock (§3). Zaštita se tako prenosi bez rupe: do koraka 10 podatke štiti WAL, a od koraka 10 objavljena tabela.
+
+### 6.4 Compaction (`CompactionJob.compact`, CP1 §20.3)
+
+| Korak | Kod | Šta je bitno |
+|---:|---|---|
+| 1 | `select` | ulazi su **sve** tabele iz trenutnog manifesta, upoređene sa pogledom engine-a; razlika je greška, ne pretpostavka; `compactionAttempts++`; failpoint `compaction.after-selection.before-output` |
+| 2 | `count`, pa `writeOutput` | `MergingIterator` (Mladen) daje jedan zapis po ključu, onaj sa najvećim `sequence`, i **zadržava tombstone-e** (I8). Prolazi se **dva puta**: prvo se prebroje zapisi, pa se upisuju, jer writer traži tačan broj unapred; ništa se ne drži u memoriji |
+| 3–5 | `SSTableDiskWriter.writeAndFinalize` | isto kao flush; Bloom filter se pravi za tačan broj izlaznih zapisa, pa sadrži i ključeve tombstone-a |
+| — | failpoint, `open` | `compaction.after-output-finalize.before-manifest` |
+| 6–7 | `underEngineWriteLock` → `publish` | svaki izabrani ulaz mora i dalje biti i u manifestu i u pogledu; nov manifest uklanja **tačno** ulaze, dodaje izlaz, čuva svaku drugu tabelu i **ne** menja `flushedThroughSequence` |
+| 8 | `installCompactionResult` | ulazi napuštaju pogled, izlaz ulazi; `compactionPublications++` |
+| 9–10 | `retireInputs` | failpoint `compaction.after-manifest-publish.before-input-delete`, brisanje ulaznih fajlova, force `sst/` |
+
+Compaction ne menja ono što vraćaju `GET` i `SCAN`, samo fajlove. Tombstone se ne uklanja ni kada je jedini zapis ključa, jer CP1 ne daje dokaz pokrivenosti koji bi to učinio bezbednim (CP1 §20.2).
+
+### 6.5 Greške i granice pada
+
+| Gde | Tokom rada | Posle restarta |
+|---|---|---|
+| pre preimenovanja manifesta (pisanje, force, preimenovanje izlaza, oba `*.before-manifest` failpoint-a, `manifest.after-temp-sync.before-rename`) | posao vraća grešku, svoj izlaz briše (`temporaryFilesRemoved` za privremeni, `orphanFilesRemoved` za finalizovan), mehanizam ostaje `READY`, ponovni pokušaj je dozvoljen | stari manifest je merodavan; flush: WAL se ponovo primenjuje; compaction: ulazi ostaju; zaostali izlaz je orphan (CP1-FLS-002, 003, 005, CMP-003) |
+| posle preimenovanja, pre force-a `lsm/` (`manifest.after-rename.before-directory-sync`) | `reportFatalError`, mehanizam ide u `FAILED`; ništa se ne briše | oporavak vidi kompletan stari ili kompletan nov manifest; oba su zaštićena jer ništa nije obrisano (CP1-FLS-006) |
+| posle trajne objave, pri brisanju WAL-a ili ulaza (oba `*.after-manifest-publish.*` failpoint-a) | posao vraća grešku, ali mehanizam ostaje `READY`; greška je u logu i u `maintenance.lastError` | nov manifest je merodavan; pokriveni WAL se ne primenjuje (`walRecordsReplayed = 0`) i briše se; stari ulazi su orphan-i (CP1-FLS-004, CMP-004) |
+| oštećen ulaz tokom compaction-a | `reportFatalError` sa originalnom kategorijom (npr. `DATA_BLOCK`), mehanizam ide u `FAILED`, isto kao `GET`/`SCAN` (§7.3) | oporavak proverava sve tabele i staje sa istom kategorijom (I7) |
+
+Pad (`CRASH`) na bilo kojoj od ovih granica ostavlja kompletan stari ili kompletan nov manifest. Do preimenovanja manifesta podatke štite stari WAL i stare tabele, a posle njega nova tabela; brisanje uvek dolazi poslednje.
+
+### 6.6 Testovi
+
+- Unit testovi: `ManifestTest`, `ManifestManagerTest` (redosled `StorageIO` poziva i oba `manifest.*` failpoint-a), `TableIdAllocatorTest`, `FlushJobTest` i `CompactionJobTest` (pravi `Engine` i prave SSTable, `IO_ERROR` na svakoj granici i ponovni pokušaj), `MaintenanceWorkerTest` i `MaintenanceWorkerCompactionTest` (ugovor §23, rok, okidač, serijalizacija), `MaintenanceProgressTest`, `InspectManifestTest`.
+- Scenariji nad pravim čvorom: CP1-FLS-001 (flush, `NO_OP`, restart, čitanja iz SSTable), FLS-003 do FLS-006 (svaka granica objave), CMP-001 (najveći `sequence` po ključu, high-water nepromenjen), CMP-002 (tombstone-i u izlazu i Bloom filteru), CMP-003 i CMP-004 (pad pre i posle compaction manifesta). Zajednički pomoćnik je `scenarios/FlushScenarioChecks`.
+- Bootstrap failpoint-i (CP1 §26.3) još ne postoje, pa automatski flush posle restarta ne može da se zaustavi; scenariji zato proveravaju brojače oporavka i prihvataju oba dozvoljena krajnja stanja (stari manifest ili kasniju pravu objavu).
 
 ---
 
@@ -303,5 +372,9 @@ Izbori koji se tiču mehanizma i API-ja (obrazloženja u `docs/ODLUKE.md`):
 | oporavljena generacija se flush-uje **posle** `READY` | `ODLUKE.md`, red o `Engine.open` |
 | posle neuspelog oporavka čvor ostaje živ u `FAILED`; dijagnostika je u `/health/ready` (`lastFatalError`), javni port vraća 503 | `ODLUKE.md`, red o neuspelom oporavku od 23.10.2026. |
 | `DLSM_DATA_DIR` (podrazumevano `/var/lib/dlsm`) bira direktorijum podataka | `ODLUKE.md`, red o `DLSM_DATA_DIR` |
+| manifest se čita strogo; high-water provera je `maxSequence ≤ flushedThroughSequence` | `ODLUKE.md`, red o čitanju `MANIFEST.json` od 23.10.2026. |
+| održavanje je jedna nit radnika; automatski poslovi se posle greške ne ponavljaju sami | `ODLUKE.md`, red o radniku održavanja |
+| greška posle trajne objave flush-a (brisanje WAL-a) ostavlja mehanizam `READY` | `ODLUKE.md`, red o grešci posle objave flush-a |
+| compaction: oštećen ulaz vodi u `FAILED`, izlaz u dva prolaza, brojači čišćenja | `ODLUKE.md`, red o compaction-u |
 
-Privremeno, samo do isporuke pravih delova (M1): `InMemoryWal`, `InMemoryFlusher`/`MemoryTable` i privremeni delovi statusa u `NodeStatus` (WAL segmenti bez veličine, manifest izveden iz tabela, održavanje uvek `IDLE`).
+Samo za unit testove mehanizma: `Engine.openInMemory`, `InMemoryWal` i `InMemoryFlusher`/`MemoryTable`; čvor ih ne koristi. Privremeno u statusu: WAL segmenti u `NodeStatus` su izvedeni iz mehanizma, bez veličine; manifest i održavanje su pravi (`ManifestManager`, `MaintenanceProgress`).

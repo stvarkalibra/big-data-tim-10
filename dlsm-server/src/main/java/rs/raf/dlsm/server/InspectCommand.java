@@ -1,6 +1,7 @@
 
 package rs.raf.dlsm.server;
 
+import rs.raf.dlsm.inspect.InspectManifest;
 import rs.raf.dlsm.inspect.InspectSSTableCommand;
 import rs.raf.dlsm.inspect.InspectWal;
 
@@ -19,7 +20,8 @@ public final class InspectCommand {
 
     private static final String USAGE =
             "usage: inspect wal [--data-dir PATH]\n"
-                    + "       inspect sstable <tableId> [--data-dir PATH]";
+                    + "       inspect sstable <tableId> [--data-dir PATH]\n"
+                    + "       inspect manifest [--data-dir PATH]";
 
     private InspectCommand() {
     }
@@ -40,6 +42,17 @@ public final class InspectCommand {
         String target = args.get(0);
 
         return switch (target) {
+
+            case "manifest" -> {
+                Path dataDir = parseDataDir(
+                        args.subList(1, args.size()),
+                        err
+                );
+
+                yield dataDir == null
+                        ? EXIT_USAGE
+                        : InspectManifest.run(dataDir, out);
+            }
 
             case "wal" -> {
                 Path dataDir = parseDataDir(
