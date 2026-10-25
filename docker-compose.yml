@@ -17,7 +17,7 @@ services:
     profiles:
       - standalone
 
-  # ./dbctl inspect wal | sstable <id>: the server's offline inspector over the
+  # ./dbctl inspect manifest | wal | sstable <id>: the server's offline inspector over the
   # stopped node's volume, mounted read-only so inspection can change nothing.
   inspect:
     build:
