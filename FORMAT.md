@@ -7,7 +7,7 @@ Ovaj fajl opisuje tačne bajtove svih fajlova koje mehanizam upisuje na disk (CP
 | Zajednička pravila, raspored direktorijuma | §1, §2 | Matej (urednik fajla) |
 | WAL segment i okvir zapisa | §3 | Matej |
 | `node.json` | §4 | Matej |
-| SSTable (Bloom filter, blok podataka, retki indeks) | odeljci „SSTable — …“ ispod | Kimi |
+| SSTable (Bloom filter, blok podataka, retki indeks) | §6–§9 | Kimi |
 | `MANIFEST.json` i dodela ID-ja tabela | §5 | Ilija |
 
 Izmena bilo kog formata je izmena zajedničkog ugovora: najava u grupi, obavezan PR, saglasnost vlasnika i red u `docs/ODLUKE.md` (plan §5.3).
@@ -510,405 +510,297 @@ Svaka tabela u `sstables` ima polja iz §5.1 i još `fileStatus` (`PRESENT`, `MI
 | `2` | `MANIFEST.json` ne postoji (`MISSING`) |
 | `3` | čitanje nije uspelo iz drugog razloga (`IO_ERROR`) |
 
-## SSTable — Bloom Filter Format (Version 1)
 
-### Parameters
+## 6. SSTable — format Bloom filtera (verzija 1)
 
-- Hash algorithm: SHA-256
-- Hash version: 1
-- Number of hash probes: 7
-- Bit count: max(64, 10 * entryCount), rounded up to a multiple of 8
-- All multi-byte integers: big-endian
-- Bit numbering: least-significant-bit first within each byte
+### Parametri
 
-### Hashing
+- Heš algoritam: SHA-256
+- Verzija heša: 1
+- Broj heš probi: 7
+- Broj bitova: `max(64, 10 * entryCount)`, zaokruženo naviše na umnožak broja 8
+- Svi višebajtni celi brojevi: big-endian
+- Numerisanje bitova: unutar svakog bajta kreće se od najmanje značajnog bita
 
-Keys are encoded as ASCII bytes.
+### Heširanje
 
-The first 8 bytes of the SHA-256 digest form h1.
-The following 8 bytes form h2.
+Ključevi se kodiraju kao ASCII bajtovi.
 
-h2 is made odd using:
+Prvih 8 bajtova SHA-256 sažetka čini `h1`, sledećih 8 bajtova čini `h2`.
 
-h2 = h2 | 1
+`h2` se pravi neparnim: `h2 = h2 | 1`.
 
-For each probe i, where 0 <= i < 7:
+Za svaku probu `i`, gde je `0 <= i < 7`:
 
-position = Long.remainderUnsigned(h1 + i * h2, m)
+`position = Long.remainderUnsigned(h1 + i * h2, m)`
 
-Java long arithmetic uses 64-bit overflow.
+Java `long` aritmetika koristi 64-bitno prelivanje.
 
-### Binary Format
+### Binarni format
 
-| Field | Size |
+| Polje | Veličina |
 |---|---:|
-| Magic ("BLM1") | 4 bytes |
-| Hash version | 4 bytes |
-| Bit count | 4 bytes |
-| Hash function count | 4 bytes |
-| Bit array length | 4 bytes |
-| Bit array | Variable |
-| CRC32C checksum | 4 bytes |
+| Magic (`BLM1`) | 4 bajta |
+| Verzija heša | 4 bajta |
+| Broj bitova | 4 bajta |
+| Broj heš funkcija | 4 bajta |
+| Dužina niza bitova | 4 bajta |
+| Niz bitova | promenljivo |
+| CRC32C | 4 bajta |
 
-Total serialized size: 24 + bitArrayLength bytes.
+Ukupna veličina serijalizovanog filtera: `24 + bitArrayLength` bajtova.
 
-CRC32C covers every byte except the final 4-byte checksum.
+CRC32C pokriva svaki bajt osim poslednja 4 bajta kontrolne sume.
 
-### Validation
+### Validacija
 
-Deserialization rejects:
+Deserijalizacija odbija:
 
-- Invalid magic
-- Unsupported hash version
-- Incorrect hash function count
-- Invalid bit count
-- Incorrect bit array length
-- Truncated data
-- CRC32C mismatch
+- neispravan magic
+- nepodržanu verziju heša
+- pogrešan broj heš funkcija
+- neispravan broj bitova
+- pogrešnu dužinu niza bitova
+- skraćene podatke
+- nepodudaranje CRC32C
 
-### Semantics
+### Semantika
 
-Bloom filters may produce false positives but must never
-produce false negatives for inserted keys.
+Bloom filter može dati lažno pozitivan rezultat, ali nikad lažno negativan za ubačene ključeve.
 
-Deleted keys (tombstones) must also be included.
+Obrisani ključevi (tombstone) takođe moraju biti u filteru.
 
-A negative Bloom result allows skipping SSTable data-block reads.
+Negativan rezultat dozvoljava da se preskoči čitanje bloka podataka. Pozitivan rezultat zahteva proveru odgovarajućeg bloka.
 
-A positive Bloom result requires checking the relevant data block.
+## 7. SSTable — format bloka podataka (v1)
 
-
-## SSTable — Data Block Format (v1)
-
-### Constants
+### Konstante
 
 - Magic: `DBL1`
-- Format version: 1
-- Target block payload size: 4096 bytes
-- Maximum value size: 262144 bytes
-- Byte order: big-endian
-- Checksum: CRC32C
+- Verzija formata: 1
+- Ciljna veličina sadržaja bloka: 4096 bajtova
+- Najveća veličina vrednosti: 262144 bajta
+- Redosled bajtova: big-endian
+- Kontrolna suma: CRC32C
 
-### Data Block Layout
+### Raspored bloka
 
-| Field | Size |
+| Polje | Veličina |
 |---|---:|
-| Magic (`DBL1`) | 4 bytes |
-| Version | 4 bytes |
-| Record count | 4 bytes |
-| Payload length | 4 bytes |
-| Records | Variable |
-| CRC32C | 4 bytes |
+| Magic (`DBL1`) | 4 bajta |
+| Verzija | 4 bajta |
+| Broj zapisa | 4 bajta |
+| Dužina sadržaja | 4 bajta |
+| Zapisi | promenljivo |
+| CRC32C | 4 bajta |
 
-CRC32C covers all bytes except the final checksum.
+CRC32C pokriva sve bajtove osim poslednje kontrolne sume.
 
-### Record Layout
+### Raspored zapisa
 
-| Field | Size |
+| Polje | Veličina |
 |---|---:|
-| Key length | 4 bytes |
-| Sequence number | 8 bytes |
-| Record kind | 1 byte |
-| Value length | 4 bytes |
-| Key bytes | Variable |
-| Value bytes | Variable |
+| Dužina ključa | 4 bajta |
+| Redni broj (`sequence`) | 8 bajtova |
+| Vrsta zapisa | 1 bajt |
+| Dužina vrednosti | 4 bajta |
+| Bajtovi ključa | promenljivo |
+| Bajtovi vrednosti | promenljivo |
 
-Record kinds:
+Vrste zapisa:
+
 - `1` = PUT
 - `2` = DELETE (tombstone)
 
-For DELETE, value length is -1 and no value bytes are stored.
+Za DELETE dužina vrednosti je `-1` i nijedan bajt vrednosti se ne čuva. Za prazan PUT dužina vrednosti je `0`.
 
-For an empty PUT, value length is 0.
+Zapisi moraju biti poređani po ključu strogo rastuće. Dupli ključevi unutar bloka su zabranjeni. Zapis koji prelazi ciljnu veličinu čuva se u sopstvenom bloku.
 
-Records must be sorted by key in strictly increasing order. Duplicate keys are forbidden inside a block.
+### Validacija
 
-An oversized record is stored in its own block.
+Dekoder odbija neispravan magic, nepodržanu verziju, skraćene zapise, neispravne dužine, duple ili neuređene ključeve, neispravne redne brojeve i nepodudaranje CRC32C.
 
-### Validation
+## 8. SSTable — format retkog indeksa (v1)
 
-The decoder rejects invalid magic, unsupported versions, truncated records, invalid lengths, duplicate or unsorted keys, invalid sequence numbers, and CRC mismatches.
-
-## SSTable — Sparse Index Format (v1)
-
-### Constants
+### Konstante
 
 - Magic: `IDX1`
-- Format version: 1
-- Byte order: big-endian
-- Checksum: CRC32C
+- Verzija formata: 1
+- Redosled bajtova: big-endian
+- Kontrolna suma: CRC32C
 
-### Index Layout
+### Raspored indeksa
 
-| Field | Size |
+| Polje | Veličina |
 |---|---:|
-| Magic (`IDX1`) | 4 bytes |
-| Version | 4 bytes |
-| Entry count | 4 bytes |
-| Index entries | Variable |
-| CRC32C | 4 bytes |
+| Magic (`IDX1`) | 4 bajta |
+| Verzija | 4 bajta |
+| Broj stavki | 4 bajta |
+| Stavke indeksa | promenljivo |
+| CRC32C | 4 bajta |
 
-### Index Entry Layout
+### Raspored stavke indeksa
 
-| Field | Size |
+| Polje | Veličina |
 |---|---:|
-| First key length | 4 bytes |
-| First key bytes | Variable |
-| Block offset | 8 bytes |
-| Block length | 4 bytes |
+| Dužina prvog ključa | 4 bajta |
+| Bajtovi prvog ključa | promenljivo |
+| Pomak bloka | 8 bajtova |
+| Dužina bloka | 4 bajta |
 
-Each entry identifies the first key and physical position of one data block.
+Svaka stavka određuje prvi ključ i fizički položaj jednog bloka podataka.
 
-Index keys must be strictly increasing. Block ranges must not overlap.
+Ključevi u indeksu moraju biti strogo rastući, a opsezi blokova se ne smeju preklapati.
 
-Point lookup uses binary search to locate the entry with the greatest first key less than or equal to the requested key.
+Tačkasto čitanje koristi binarnu pretragu da nađe stavku sa najvećim prvim ključem koji je manji ili jednak traženom. Ako traženi ključ prethodi prvom ključu u indeksu, ne postoji blok kandidat. Indeks ne čuva svaki korisnički ključ.
 
-If the requested key precedes the first index key, no candidate block exists.
+### Validacija
 
-The index does not store every user key.
+Dekoder proverava kontrolnu sumu, verziju formata, broj stavki, ispravnost ključeva, strogo rastući redosled, pozitivne dužine blokova, nenegativne pomake i da se opsezi blokova ne preklapaju.
 
-### Validation
+Ovi formati su kodiranja verzije 1 koja je odredio tim. `SSTableWriter` i `SSTableReader` moraju dosledno koristiti upravo ova kodiranja.
 
-The decoder checks the checksum, format version, entry count, key validity, strictly increasing keys, positive block lengths, nonnegative offsets, and nonoverlapping block ranges.
+## 9. SSTable — format celog fajla (v1)
 
-These formats are version 1 team-defined encodings. SSTableWriter and SSTableReader must use these exact encodings consistently.
+### Opšta pravila
 
-## SSTable — Complete File Format (v1)
+- Ime fajla: `sst-<tableId sa 20 cifara>.sst`
+- Redosled bajtova: big-endian
+- Verzija formata: 1
+- Kodiranje ključeva: ASCII
+- Kontrolne sume: CRC32C
+- Tabele su nepromenljive posle finalizacije.
+- Ključevi se čuvaju strogo rastuće.
+- Svaki logički ključ se javlja najviše jednom po tabeli.
+- DELETE tombstone se čuva kao zapis i ulazi u Bloom filter.
 
-### General rules
+### Raspored fajla
 
-- File name: `sst-<20-digit-tableId>.sst`
-- Byte order: big-endian
-- Format version: 1
-- Key encoding: ASCII
-- Checksums: CRC32C
-- Tables are immutable after finalization.
-- Keys are stored in strictly increasing order.
-- Every logical key occurs at most once per SSTable.
-- DELETE tombstones are stored as records and included in Bloom.
+Ceo SSTable ima pet susednih oblasti:
 
-### File layout
-
-The complete SSTable consists of five contiguous regions:
-
-| Region | Size | Description |
+| Oblast | Veličina | Opis |
 |---|---:|---|
-| Header | 16 bytes | Magic, version, table ID |
-| Data blocks | Variable | Sorted records protected by CRC32C |
-| Sparse index | Variable | First key, offset and length per block |
-| Bloom filter | Variable | Membership filter for stored keys |
-| Footer | 384 bytes | Region layout and table metadata |
+| Zaglavlje | 16 bajtova | Magic, verzija, ID tabele |
+| Blokovi podataka | promenljivo | Sortirani zapisi zaštićeni CRC32C |
+| Retki indeks | promenljivo | Prvi ključ, pomak i dužina po bloku |
+| Bloom filter | promenljivo | Filter članstva za sačuvane ključeve |
+| Footer | 384 bajta | Raspored oblasti i metapodaci tabele |
 
-No gaps are permitted between regions.
+Između oblasti nisu dozvoljene praznine. Footer se uvek nalazi na `fileSize - 384`.
 
-The footer is always located at:
+### Zaglavlje
 
-`fileSize - 384`
-
-### Header
-
-| Offset | Size | Field |
+| Pomak | Veličina | Polje |
 |---|---:|---|
 | 0 | 4 | Magic `SST1` (`53 53 54 31`) |
-| 4 | 4 | Version = 1 |
-| 8 | 8 | Positive table ID |
+| 4 | 4 | Verzija = 1 |
+| 8 | 8 | ID tabele (pozitivan) |
 
-The header has no independent checksum.
+Zaglavlje nema sopstvenu kontrolnu sumu.
 
-### Data region
+### Oblast podataka
 
-Data starts at absolute offset 16.
+Podaci počinju na apsolutnom pomaku 16. Svaki blok koristi format `DBL1` iz §7.
 
-Each data block uses the `DBL1` format defined earlier
-in this document.
+Zapisi su uređeni po ključu kroz celu oblast podataka, a ne samo unutar jednog bloka. Ciljna veličina sadržaja je 4096 bajtova, a zapis koji je prevelik zauzima sopstveni blok.
 
-Records are ordered by key across the entire data region,
-not merely within each individual block.
+Blok sadrži zaglavlje od 16 bajtova, kodirani sadržaj zapisa i CRC32C od 4 bajta. CRC32C pokriva ceo blok osim poslednja 4 bajta.
 
-The target payload size is 4096 bytes. An oversized record
-occupies a separate block.
+### Oblast retkog indeksa
 
-A data block includes:
-- 16-byte header
-- Encoded record payload
-- 4-byte CRC32C checksum
+Retki indeks koristi format `IDX1` iz §8. Tačno jedna stavka opisuje svaki blok podataka i sadrži prvi ključ bloka, apsolutni pomak bloka u fajlu i kodiranu dužinu bloka. Stavke su uređene po prvom ključu.
 
-CRC32C covers the entire block except its last 4 bytes.
+Tačkasto čitanje bira poslednju stavku čiji je prvi ključ manji ili jednak traženom.
 
-### Sparse index region
+### Oblast Bloom filtera
 
-The sparse index uses the `IDX1` format described above.
+Koristi format `BLM1` iz §6: verzija heša 1, dvostruko heširanje SHA-256, sedam proba, broj bitova `max(64, 10 * expectedEntries)` zaokruženo na umnožak broja 8, numerisanje bitova od najmanje značajnog.
 
-Exactly one index entry identifies each data block.
-
-Every index entry contains:
-- First key in the referenced block
-- Absolute file offset of that block
-- Encoded length of that block
-
-Entries are ordered by their first key.
-
-Point lookup chooses the last index entry whose first key
-is less than or equal to the requested key.
-
-### Bloom region
-
-The Bloom region uses the `BLM1` format defined above.
-
-- Hash version = 1
-- SHA-256 double hashing
-- Seven probes
-- Bit count: `max(64, 10 * expectedEntries)`, rounded up
-  to a multiple of 8
-- Bit numbering within each byte is least significant bit first
-
-The Bloom filter includes both PUT keys and DELETE tombstones.
-
-A negative result allows the reader to skip the data region.
-A positive result is not proof that a key exists.
+Filter sadrži i PUT ključeve i DELETE tombstone. Negativan rezultat dozvoljava čitaocu da preskoči oblast podataka; pozitivan rezultat nije dokaz da ključ postoji.
 
 ### Footer
 
-The footer is exactly 384 bytes.
+Footer je tačno 384 bajta.
 
-| Offset within footer | Size | Field |
+| Pomak u footeru | Veličina | Polje |
 |---|---:|---|
 | 0 | 4 | Magic `FTR1` |
-| 4 | 4 | Version = 1 |
-| 8 | 8 | Table ID |
-| 16 | 8 | Data offset |
-| 24 | 8 | Data length |
-| 32 | 8 | Index offset |
-| 40 | 8 | Index length |
-| 48 | 8 | Bloom offset |
-| 56 | 8 | Bloom length |
-| 64 | 8 | Minimum sequence |
-| 72 | 8 | Maximum sequence |
-| 80 | 8 | Entry count |
-| 88 | 132 | Minimum key |
-| 220 | 132 | Maximum key |
-| 352 | 28 | Reserved, all zero |
-| 380 | 4 | Footer CRC32C |
+| 4 | 4 | Verzija = 1 |
+| 8 | 8 | ID tabele |
+| 16 | 8 | Pomak podataka |
+| 24 | 8 | Dužina podataka |
+| 32 | 8 | Pomak indeksa |
+| 40 | 8 | Dužina indeksa |
+| 48 | 8 | Pomak Bloom filtera |
+| 56 | 8 | Dužina Bloom filtera |
+| 64 | 8 | Najmanji `sequence` |
+| 72 | 8 | Najveći `sequence` |
+| 80 | 8 | Broj zapisa |
+| 88 | 132 | Najmanji ključ |
+| 220 | 132 | Najveći ključ |
+| 352 | 28 | Rezervisano, sve nule |
+| 380 | 4 | CRC32C footera |
 
-Each fixed-width key field contains:
-- 4-byte key length
-- Up to 128 ASCII key bytes
-- Zero padding to 128 key bytes
+Svako polje ključa fiksne širine sadrži dužinu ključa (4 bajta), do 128 ASCII bajtova ključa i dopunu nulama do 128 bajtova ključa. CRC32C footera pokriva bajtove footera od 0 do 379.
 
-The footer CRC32C covers footer bytes 0 through 379.
+Ceo fajl mora da zadovoljava:
 
-The complete file must satisfy:
+- `dataOffset = 16`
+- `indexOffset = dataOffset + dataLength`
+- `bloomOffset = indexOffset + indexLength`
+- `footerOffset = bloomOffset + bloomLength`
+- `fileSize = footerOffset + 384`
 
-`dataOffset = 16`
+Svi pomaci oblasti su apsolutni pomaci u fajlu.
 
-`indexOffset = dataOffset + dataLength`
+### Potpuna validacija
 
-`bloomOffset = indexOffset + indexLength`
+Validator prima putanju i očekivani `SSTableMeta`. Proverava:
 
-`footerOffset = bloomOffset + bloomLength`
+1. postojanje fajla i najmanju veličinu
+2. magic, verziju i ID tabele u zaglavlju
+3. magic, verziju i CRC32C footera
+4. tačne, susedne granice oblasti
+5. format, redosled i kontrolnu sumu retkog indeksa
+6. format, parametre i kontrolnu sumu Bloom filtera
+7. svaki blok podataka i njegovu kontrolnu sumu
+8. strogo rastući redosled ključeva i preko granica blokova
+9. da stavke indeksa odgovaraju svojim blokovima
+10. da nema lažno negativnih rezultata Bloom filtera za sačuvane ključeve
+11. broj zapisa, najmanji i najveći ključ i `sequence`
+12. slaganje sa očekivanim metapodacima iz manifesta
 
-`fileSize = footerOffset + 384`
+Blokovi se čitaju postepeno, bez učitavanja celog SSTable u memoriju. Oštećeni podaci se nikad ne tumače kao odsutan ključ.
 
-All region offsets are absolute file offsets.
+### Dekodiran primer — SSTable sa jednim zapisom
 
-### Complete validation
+Ulaz:
 
-The validator accepts a Path and expected SSTableMeta.
+- `tableId = 7`
+- ključ = `alpha`
+- `sequence = 1`
+- vrsta = PUT
+- vrednost = ASCII `A`
+- `expectedEntries = 1`
 
-It verifies:
-1. File existence and minimum size
-2. Header magic, version and table ID
-3. Footer magic, version and CRC32C
-4. Exact, contiguous region boundaries
-5. Sparse index format, ordering and checksum
-6. Bloom format, parameters and checksum
-7. Each data block and its checksum
-8. Strict key ordering across block boundaries
-9. Index entries matching their data blocks
-10. No Bloom false negatives for stored keys
-11. Entry count, min/max keys and sequences
-12. Agreement with expected manifest metadata
+Dobijena tabela ima 512 bajtova.
 
-Data blocks are read progressively, without loading
-the complete SSTable into memory.
-
-Corrupt data must never be interpreted as a missing key.
-
-### Decoded example — one-record SSTable
-
-Input:
-
-- tableId = 7
-- key = `alpha`
-- sequence = 1
-- kind = PUT
-- value = ASCII `A`
-- expectedEntries = 1
-
-The resulting table is 512 bytes.
-
-| Region | Absolute offset | Length |
+| Oblast | Apsolutni pomak | Dužina |
 |---|---:|---:|
-| Header | 0 | 16 |
-| Data block | 16 | 43 |
-| Sparse index | 59 | 37 |
+| Zaglavlje | 0 | 16 |
+| Blok podataka | 16 | 43 |
+| Retki indeks | 59 | 37 |
 | Bloom | 96 | 32 |
 | Footer | 128 | 384 |
 
-Header fields:
+Zaglavlje: magic `SST1`, verzija 1, `tableId = 7`.
 
-- magic = `SST1`
-- version = 1
-- tableId = 7
+Blok podataka: magic `DBL1`, verzija 1, `recordCount = 1`, `payloadLength = 23`, ključ `alpha`, `sequence = 1`, vrsta PUT, `valueLength = 1`, vrednost `A`, ispravan CRC32C.
 
-Data block:
+Retki indeks: magic `IDX1`, `entryCount = 1`, `firstKey = alpha`, `blockOffset = 16`, `blockLength = 43`, ispravan CRC32C.
 
-- magic = `DBL1`
-- version = 1
-- recordCount = 1
-- payloadLength = 23
-- record key = `alpha`
-- sequence = 1
-- kind = PUT
-- valueLength = 1
-- value = `A`
-- CRC32C = valid
+Bloom: magic `BLM1`, `hashVersion = 1`, `bitCount = 64`, `hashFunctions = 7`, `bitArrayLength = 8`, `mightContain("alpha") = true`, ispravan CRC32C.
 
-Sparse index:
+Footer: magic `FTR1`, `tableId = 7`, `dataOffset = 16`, `dataLength = 43`, `indexOffset = 59`, `indexLength = 37`, `bloomOffset = 96`, `bloomLength = 32`, `minKey = maxKey = alpha`, `minSequence = maxSequence = 1`, `entryCount = 1`, ispravan CRC32C.
 
-- magic = `IDX1`
-- entryCount = 1
-- firstKey = `alpha`
-- blockOffset = 16
-- blockLength = 43
-- CRC32C = valid
-
-Bloom:
-
-- magic = `BLM1`
-- hashVersion = 1
-- bitCount = 64
-- hashFunctions = 7
-- bitArrayLength = 8
-- `mightContain("alpha")` = true
-- CRC32C = valid
-
-Footer:
-
-- magic = `FTR1`
-- tableId = 7
-- dataOffset = 16
-- dataLength = 43
-- indexOffset = 59
-- indexLength = 37
-- bloomOffset = 96
-- bloomLength = 32
-- minKey = `alpha`
-- maxKey = `alpha`
-- minSequence = 1
-- maxSequence = 1
-- entryCount = 1
-- CRC32C = valid
-
-The example is also checked by
-`SSTableFormatContractTest`.
+Primer proverava i `SSTableFormatContractTest`.
