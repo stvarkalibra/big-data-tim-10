@@ -36,11 +36,14 @@ import java.util.stream.Stream;
  *   <li><b>Client outcome:</b> the flush never receives a response.</li>
  *   <li><b>Logical oracle:</b> after restart every confirmed key has the
  *       value from the model and the deleted key is {@code NOT_FOUND}.</li>
- *   <li><b>Physical oracle:</b> the manifest {@code M} is unchanged before
- *       and after recovery, no table is published in {@code sst/}, the
- *       temporary output is removed from {@code tmp/}, the
- *       {@code temporaryFilesRemoved} counter covers it, and at least one
- *       WAL segment remains until a later successful flush.</li>
+ *   <li><b>Physical oracle:</b> the manifest {@code M} is unchanged until
+ *       recovery. After recovery no table is published from the abandoned
+ *       temporary output: either the manifest is still {@code M}, or the
+ *       flush of the recovered generation (queued right after READY) has
+ *       published fresh tables, one manifest generation each. The temporary
+ *       output is removed from {@code tmp/}, the
+ *       {@code temporaryFilesRemoved} counter covers it, and a WAL segment
+ *       exists.</li>
  *   <li><b>Proves:</b> an unpublished, possibly complete, temporary SSTable
  *       is never authoritative. <b>Does not prove:</b> the
  *       {@code flush.*} hooks after publication (FLS-003 to FLS-004).</li>
@@ -121,7 +124,7 @@ public final class Cp1Fls002 {
             check(!hasFiles(dataDir.resolve("lsm/sst"), "sst-"), hook,
                     "a finalized SSTable appeared before the final rename");
 
-            int temporaryBefore = countFiles(dataDir.resolve("lsm/tmp"));
+            List<String> abandonedTemporaries = listFileNames(dataDir.resolve("lsm/tmp"));
 
             node.restart();
             node.awaitReady(READY_TIMEOUT_MS);
@@ -132,20 +135,11 @@ public final class Cp1Fls002 {
             }
             steps.expectNotFound("beta");
 
-            // Physical oracle after recovery.
-            check(readManifest(dataDir).equals(manifestBefore), hook,
-                    "manifest changed by recovery");
-            check(!hasFiles(dataDir.resolve("lsm/sst"), "sst-"), hook,
-                    "recovery published a table");
-            check(countFiles(dataDir.resolve("lsm/tmp")) == 0, hook,
-                    "temporary output was not removed");
-            check(hasFiles(dataDir.resolve("lsm/wal"), "wal-"), hook,
-                    "WAL protecting unflushed mutations is missing");
-
-            long removed = temporaryFilesRemoved(adminPort, hook);
-            check(removed >= temporaryBefore, hook,
-                    "temporaryFilesRemoved " + removed
-                            + " does not cover " + temporaryBefore + " temporary file(s)");
+            // Recovery hands the replayed generation to the flush worker right
+            // after READY (docs/ODLUKE.md), so the physical state is judged
+            // only once that flush has finished.
+            JsonNode status = awaitRecoveredGenerationFlushed(adminPort, hook);
+            checkPhysicalState(dataDir, hook, manifestBefore, status, abandonedTemporaries);
         } finally {
             VolumeTools.deleteDirectory(dataDir);
         }
@@ -164,16 +158,19 @@ public final class Cp1Fls002 {
         }
     }
 
-    private static int countFiles(Path dir) throws IOException {
+    private static List<String> listFileNames(Path dir) throws IOException {
         if (!Files.isDirectory(dir)) {
-            return 0;
+            return List.of();
         }
         try (Stream<Path> entries = Files.list(dir)) {
-            return (int) entries.filter(Files::isRegularFile).count();
+            return entries.filter(Files::isRegularFile)
+                    .map(p -> p.getFileName().toString())
+                    .sorted()
+                    .toList();
         }
     }
 
-    private static long temporaryFilesRemoved(int adminPort, String hook) throws Exception {
+    private static JsonNode readStatus(int adminPort, String hook) throws Exception {
         HttpRequest request = HttpRequest.newBuilder(
                         URI.create("http://localhost:" + adminPort + "/admin/v1/storage/status"))
                 .GET()
@@ -181,8 +178,72 @@ public final class Cp1Fls002 {
         HttpResponse<String> response = HTTP.send(request, HttpResponse.BodyHandlers.ofString());
         check(response.statusCode() == 200, hook,
                 "status HTTP " + response.statusCode() + ": " + response.body());
-        return MAPPER.readTree(response.body()).path("stats")
-                .path("temporaryFilesRemoved").asLong(-1);
+        return MAPPER.readTree(response.body());
+    }
+
+    /** Waits (bounded) for the maintenance worker to finish the recovered generation. */
+    private static JsonNode awaitRecoveredGenerationFlushed(int adminPort, String hook) {
+        JsonNode[] settled = new JsonNode[1];
+        Await.until(() -> {
+            try {
+                JsonNode status = readStatus(adminPort, hook);
+                boolean flushed = status.path("immutableMemtable").isNull()
+                        && "NONE".equals(status.path("maintenance").path("operation").asText());
+                if (flushed) {
+                    settled[0] = status;
+                }
+                return flushed;
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        }, Duration.ofMillis(READY_TIMEOUT_MS), ID + " " + hook
+                + ": recovered generation was not flushed");
+        return settled[0];
+    }
+
+    /**
+     * The manifest never names the abandoned temporary output. Either recovery
+     * published nothing and the manifest is still {@code M}, or the flush of
+     * the recovered generation published fresh tables from the WAL: each
+     * publication is one new manifest generation, and none of the tables is
+     * the file the crashed flush was building.
+     */
+    private static void checkPhysicalState(Path dataDir, String hook, JsonNode manifestBefore,
+                                           JsonNode status, List<String> abandonedTemporaries)
+            throws IOException {
+        JsonNode manifest = readManifest(dataDir);
+        long publications = status.path("stats").path("flushPublications").asLong(-1);
+        check(publications >= 0, hook, "status has no flushPublications counter");
+
+        if (publications == 0) {
+            check(manifest.equals(manifestBefore), hook, "manifest changed by recovery");
+            check(listFileNames(dataDir.resolve("lsm/sst")).stream().noneMatch(f -> f.startsWith("sst-")),
+                    hook, "recovery published a table");
+        } else {
+            long generation = manifest.path("generation").asLong();
+            long expected = manifestBefore.path("generation").asLong() + publications;
+            check(generation == expected, hook, "manifest generation " + generation
+                    + " is not M plus " + publications + " publication(s)");
+            check(manifest.path("sstables").size() == publications, hook,
+                    "manifest names " + manifest.path("sstables").size()
+                            + " table(s) after " + publications + " publication(s)");
+            for (JsonNode table : manifest.path("sstables")) {
+                String file = table.path("file").asText();
+                check(Files.isRegularFile(dataDir.resolve("lsm/sst").resolve(file)), hook,
+                        "published table " + file + " is missing");
+                check(!abandonedTemporaries.contains(file + ".tmp"), hook,
+                        "published table " + file + " reuses the abandoned temporary output");
+            }
+        }
+
+        check(listFileNames(dataDir.resolve("lsm/tmp")).isEmpty(), hook,
+                "temporary output was not removed");
+        check(hasFiles(dataDir.resolve("lsm/wal"), "wal-"), hook, "no WAL segment remains");
+
+        long removed = status.path("stats").path("temporaryFilesRemoved").asLong(-1);
+        check(removed >= abandonedTemporaries.size(), hook,
+                "temporaryFilesRemoved " + removed
+                        + " does not cover " + abandonedTemporaries.size() + " temporary file(s)");
     }
 
     private static void check(boolean condition, String what, String problem) {
