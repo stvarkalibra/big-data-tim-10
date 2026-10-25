@@ -87,3 +87,43 @@ Gotovo sav kod i testovi iz Mladenovih grana nastali su u radu sa AI alatom, com
 - **`RECOVERING` i ubrizgan `IO_ERROR` tokom oporavka nisu testirani na nivou čvora.** Za to treba failpoint naoružan pre pokretanja (`DLSM_TEST_BOOTSTRAP_FAILPOINTS_B64`).
 - **Status čvora koji je pao u oporavku je 503.** Dijagnostika je samo u `/health/ready`, dok Kimi ne odluči da li status sme da ima `activeMemtable: null`.
 - **Windows.** Pravi server na Windows-u ne prolazi force direktorijuma, pa WAL scenariji lokalno rade samo u Docker-u ili CI-ju.
+
+---
+
+## Kimi — SSTable, statistike, status i logovi
+
+### Alati
+
+- **Claude Code** (desktop aplikacija, model Claude Opus 5.5 i Sonnet 5.5): čitanje specifikacije, pisanje koda i testova po koracima, pregled usklađenosti sa ugovorima drugih modula.
+
+### Šta je nastalo uz AI pomoć
+
+| Grana | Komponente |
+|---|---|
+| `kimi/storage-stats`, `kimi/json-log-hardening` | `StorageStats` (brojači iz CP1 §24, `resetEpoch`), `JsonLog` |
+| `kimi/bloom-filter`, `kimi/sstable-blocks`, `kimi/sstable-format-contract` | `BloomFilter`, `BlockCodec`, `SparseIndex`, `FORMAT.md` §SSTable |
+| `kimi/sstable-writer`, `kimi/sstable-writer-self-check`, `kimi/sstable-stream-encoder` | `SSTableWriter`, `SSTableStreamEncoder`, samoprovera writer-a |
+| `kimi/sstable-persistence`, `kimi/sstable-disk-reader`, `kimi/sstable-read-statistics` | `SSTableFinalizer`, `SSTableReader`, `SSTableIterator`, brojači čitanja |
+| `kimi/sstable-streaming-validator`, `kimi/sstable-recovery-verification`, `kimi/sstable-hardening`, `kimi/sstable-five-fixes` | `SSTableValidator.validateFully`, `SSTableRecoveryVerifier`, kategorije oštećenja |
+| `kimi/sstable-table-source`, `kimi/sstable-flush-record-adapter` | `DiskSSTableTableSource`, `SSTableRecordAdapter` (šav prema mehanizmu i flush-u) |
+| `kimi/sstable-inspect-cli` | `inspect sstable` |
+| `kimi/storage-status`, `kimi/admin-status-routes`, `kimi/status-failed-fix` | `StatusBuilder`, `StandaloneStatusBuilder`, `StorageStatusRoutes` |
+| `kimi/sst001-runner`, `kimi/sst-scenario-runner`, `kimi/sstable-large-scenarios`, `kimi/sstable-merge-corruption`, `kimi/sstable-multisource-corruption`, `kimi/sstable-disk-integration-tests` | scenariji CP1-SST-001 do SST-006 i testovi nad pravim fajlovima |
+| `kimi/cp1-fls-002` | scenario CP1-FLS-002 |
+
+### Kako je rad pregledan i proveren
+
+- **Specifikacija pre koda.** Za svaki deo AI je prvo čitao CP1 §11, §12, §17, §18.1, §24, §25 i §29.4; format bajtova je prvo zapisan u `FORMAT.md`, pa tek onda kod.
+- **Mali commit-ovi, pregled pre svakog.** Svaki commit je jedna celina; izmenu je pregledao Kimi pre nego što je ušla u git.
+- **Testovi uz svaki deo.** Round-trip i svaka klasa greške za blokove, indeks, Bloom i footer; statistički test Bloom filtera (bez lažno negativnih); nezavisni oracle za Bloom i tačkasto čitanje; veliki testovi tačkastog čitanja i skeniranja opsega (broj pročitanih blokova); oštećenja nad objavljenim tabelama (CRC, skraćenje, indeks, footer, nepodudaranje sa manifestom).
+- **Oštećenje nije odsustvo.** Svaki test oštećenja traži `StorageException` sa tačnom kategorijom, nikad prazan rezultat (I7).
+- **Scenariji nad pravim procesom.** SST-001 do SST-006 i FLS-002 pokrenuti su u Linux kontejneru preko `./dbctl test checkpoint-1`; oracle-i koriste nezavisni `ReferenceModel` i čitaju bajtove po `FORMAT.md`, ne produkcioni kod.
+- **Nalaz pri završnoj proveri.** FLS-002 je padao u Docker-u jer je proveravao da je manifest posle oporavka još `M`, a oporavljena generacija se flush-uje odmah posle `READY`. Oracle sada čeka da taj flush završi (status, ne `sleep`) i dozvoljava samo dva ishoda: manifest je i dalje `M`, ili je objavljen svež flush iz WAL-a koji nikad ne koristi napušteni privremeni fajl (`docs/ODLUKE.md`).
+- **Odluke zapisane.** Svaki izbor koji spec ne fiksira je u `docs/ODLUKE.md`.
+
+### Poznate slabosti i otvorena pitanja
+
+- **Windows.** `fsyncDirectory` ne radi na Windows-u, pa scenariji koji pokreću pravi server (FLS-002, WAL scenariji) lokalno rade samo u Docker-u ili CI-ju; jedinični testovi tabela rade svuda.
+- **Status posle neuspelog oporavka.** `/admin/v1/storage/status` i `/admin/v1/status` vraćaju 503 dok mehanizam ne postoji; dijagnostika je u `/health/ready` (`lastFatalError`). Spec traži status samo za mehanizam koji postoji (CP1 §24).
+- **Zavisnost od odluke o flush-u posle oporavka.** FLS-002 pretpostavlja da se oporavljena generacija flush-uje posle `READY`; ako tim to promeni, oracle i dalje prihvata oba ishoda, ali čekanje na status traži da immutable generacija nestane.
+- **Compaction čitanje.** Brojač `rangeScanBlocksRead` je proveren za `SCAN`; njegovo ponašanje pod compaction-om (CMP testovi) proverava Ilija.

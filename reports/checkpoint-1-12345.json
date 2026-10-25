@@ -2,14 +2,14 @@
   "schemaVersion" : 1,
   "suite" : "checkpoint-1",
   "seed" : "12345",
-  "selectedCaseIds" : [ "CP1-FLS-002" ],
+  "selectedCaseIds" : [ "CP1-SST-007" ],
   "cases" : [ {
-    "id" : "CP1-FLS-002",
+    "id" : "CP1-SST-007",
     "status" : "FAILED",
     "seed" : "12345",
-    "durationMs" : 1293,
+    "durationMs" : 6,
     "artifactPaths" : [ ],
-    "failurePhase" : "EXECUTION",
-    "diagnostics" : "AssertionError: CP1-FLS-002 ORACLE sstable.after-write.before-sync: flush answered HTTP 404 although the process should have halted"
+    "failurePhase" : "SETUP",
+    "diagnostics" : "Scenario not found"
   } ]
 }
