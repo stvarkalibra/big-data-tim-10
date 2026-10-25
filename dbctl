@@ -8,7 +8,7 @@ cd "$(dirname "$0")"
 TESTS_JAR=dlsm-tests/target/dlsm-tests-1.0-SNAPSHOT.jar
 SERVER_JAR=dlsm-server/target/dlsm-server-1.0-SNAPSHOT.jar
 TEST_USAGE="Usage: ./dbctl test checkpoint-1 [--list | --seed N | --case ID --seed N]"
-INSPECT_USAGE="Usage: ./dbctl inspect wal | sstable <id>"
+INSPECT_USAGE="Usage: ./dbctl inspect manifest | wal | sstable <id>"
 READY_URL=http://127.0.0.1:8082/health/ready
 READY_TIMEOUT_S=20
 
@@ -104,7 +104,7 @@ case "$COMMAND" in
     exec docker compose --profile tools run --rm -T inspect "$@"
     ;;
   *)
-    echo "Usage: ./dbctl {build|up standalone|down|reset|status|logs|test checkpoint-1 ...|inspect wal|sstable <id>}"
+    echo "Usage: ./dbctl {build|up standalone|down|reset|status|logs|test checkpoint-1 ...|inspect manifest|wal|sstable <id>}"
     exit 1
     ;;
 esac

@@ -491,6 +491,25 @@ runtimeNextTableId = max(manifest.nextTableId, 1 + najveći ispravan ID u lsm/ss
 
 Primer: manifest ima `nextTableId = 5`, a u `lsm/sst/` je ostala orphan tabela `sst-00000000000000000012.sst` iz flush-a prekinutog pre objave. Sledeća dodela je `13`.
 
+### 5.5 Pregled: `inspect manifest`
+
+`./dbctl inspect manifest` prikazuje manifest zaustavljenog volumena (CP1 §25). Implementacija je `rs.raf.dlsm.inspect.InspectManifest.run(dataDir, out)`; manifest čita produkcionim `Manifest.parse`, pa ga odbija po istim pravilima kao oporavak (§5.2).
+
+**Samo čita.** Ne briše orphan tabele ni zaostale privremene manifeste, ne popravlja ništa i ne pokreće čišćenje iz oporavka. Sadržaj SSTable fajlova ne validira; za to služi `inspect sstable`.
+
+**Izlaz** je jedan JSON objekat (UTF-8, polja uvek istim redom): `manifestFile` (uvek `lsm/MANIFEST.json`), `status` (`VALID`, `CORRUPT`, `MISSING` ili `IO_ERROR`), `sizeBytes`, `formatVersion`, `generation`, `nextTableId`, `flushedThroughSequence`, `sstableCount`, `error` (`category`, `message`) ili `null`, `sstables` po rastućem `tableId`, `orphanTables` (`sst-<id>.sst` u `lsm/sst/` koje manifest ne navodi, po imenu) i `temporaryManifests` (`MANIFEST-*.tmp` u `lsm/tmp/`, po imenu). Kada manifest ne može da se pročita ili ne prolazi validaciju, izlaz ima samo `manifestFile`, `status` i `error`.
+
+Svaka tabela u `sstables` ima polja iz §5.1 i još `fileStatus` (`PRESENT`, `MISSING` ili `SIZE_MISMATCH`) i `sizeOnDisk` (veličina fajla u bajtovima ili `null`).
+
+**Izlazni kodovi** (isti kao `inspect wal`, §3.7):
+
+| Kod | Kada |
+|---:|---|
+| `0` | `VALID`: manifest je ispravan i svaka navedena tabela postoji sa veličinom iz manifesta |
+| `1` | `CORRUPT`: `MANIFEST_INVALID` (uključujući nepodržanu verziju), `REFERENCED_FILE_MISSING` ili `MANIFEST_TABLE_MISMATCH` |
+| `2` | `MANIFEST.json` ne postoji (`MISSING`) |
+| `3` | čitanje nije uspelo iz drugog razloga (`IO_ERROR`) |
+
 ## SSTable — Bloom Filter Format (Version 1)
 
 ### Parameters
