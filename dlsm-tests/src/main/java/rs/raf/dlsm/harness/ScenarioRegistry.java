@@ -18,12 +18,17 @@ import rs.raf.dlsm.scenarios.Cp1Fls005;
 import rs.raf.dlsm.scenarios.Cp1Fls006;
 import rs.raf.dlsm.scenarios.Cp1Fls007;
 import rs.raf.dlsm.scenarios.Cp1Mdl001;
-import rs.raf.dlsm.scenarios.Cp1Sst006;
 import rs.raf.dlsm.scenarios.Cp1Sst001;
 import rs.raf.dlsm.scenarios.Cp1Sst002;
 import rs.raf.dlsm.scenarios.Cp1Sst003;
 import rs.raf.dlsm.scenarios.Cp1Sst004;
 import rs.raf.dlsm.scenarios.Cp1Sst005;
+import rs.raf.dlsm.scenarios.Cp1Sst006;
+import rs.raf.dlsm.scenarios.Cp1Wal001;
+import rs.raf.dlsm.scenarios.Cp1Wal002;
+import rs.raf.dlsm.scenarios.Cp1Wal003;
+import rs.raf.dlsm.scenarios.Cp1Wal005;
+import rs.raf.dlsm.scenarios.Cp1Wal006;
 
 import java.util.HashMap;
 import java.util.List;
@@ -38,12 +43,11 @@ import java.util.Map;
  * {@code NOT_IMPLEMENTED}, never as passed, so the suite fails until every
  * scenario exists (PI §25.3).
  */
-public final class ScenarioRegistry {
+public final class ScenarioRegistry{
 
     public interface RunnableScenario {
         void run(long seed, Report report) throws Exception;
     }
-
     /** CP1 §29.1–§29.6. */
     public static final List<String> CHECKPOINT_1_IDS = List.of(
             "CP1-API-001", "CP1-API-002", "CP1-API-003", "CP1-API-004", "CP1-API-005",
@@ -85,12 +89,18 @@ public final class ScenarioRegistry {
         register(Cp1Cmp003.ID, Cp1Cmp003::run);
         register(Cp1Cmp004.ID, Cp1Cmp004::run);
         register(Cp1Cmp005.ID, Cp1Cmp005::run);
+
+        /** Wal */
+        register(Cp1Wal001.ID, Cp1Wal001::run);
+        register(Cp1Wal002.ID, Cp1Wal002::run);
+        register(Cp1Wal003.ID, Cp1Wal003::run);
+        register(Cp1Wal005.ID, Cp1Wal005::run);
+        register(Cp1Wal006.ID, Cp1Wal006::run);
     }
 
     private ScenarioRegistry() {
     }
 
-    /** Adds the implementation of one of the 33 IDs. */
     public static void register(String id, RunnableScenario scenario) {
         if (!CHECKPOINT_1_IDS.contains(id)) {
             throw new IllegalArgumentException("Not a Checkpoint 1 scenario ID: " + id);
@@ -100,7 +110,6 @@ public final class ScenarioRegistry {
         }
     }
 
-    /** All 33 IDs in the order of the specification. */
     public static List<String> getScenarioIds() {
         return CHECKPOINT_1_IDS;
     }
@@ -109,11 +118,6 @@ public final class ScenarioRegistry {
         return implemented.containsKey(id);
     }
 
-    /**
-     * @return the scenario for {@code id}; for a Checkpoint 1 ID without an
-     *         implementation, one that reports {@code SKIPPED}; {@code null}
-     *         for an unknown ID
-     */
     public static RunnableScenario get(String id) {
         RunnableScenario scenario = implemented.get(id);
         if (scenario != null || !CHECKPOINT_1_IDS.contains(id)) {

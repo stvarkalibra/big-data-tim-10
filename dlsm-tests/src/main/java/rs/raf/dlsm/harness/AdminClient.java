@@ -93,4 +93,20 @@ public class AdminClient {
                 .build();
         return client.send(request, HttpResponse.BodyHandlers.ofString());
     }
+
+    public HttpResponse<String> storageStatus() throws Exception {
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/admin/v1/storage/status"))
+                .GET()
+                .build();
+        return client.send(request, HttpResponse.BodyHandlers.ofString());
+    }
+
+    public HttpResponse<String> resetStats() throws Exception {
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/admin/v1/storage/stats/reset"))
+                .POST(HttpRequest.BodyPublishers.noBody())
+                .build();
+        return client.send(request, HttpResponse.BodyHandlers.ofString());
+    }
 }

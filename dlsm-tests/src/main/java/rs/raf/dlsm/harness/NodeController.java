@@ -119,11 +119,9 @@ public class NodeController implements AutoCloseable {
         throw new RuntimeException("Node did not become ready within " + timeoutMs + " ms");
     }
 
-    // Nova metoda za restart
     public void restart() throws IOException {
         start(true);
     }
-
     public void crash() {
         if (process != null && process.isAlive()) {
             process.destroyForcibly();
@@ -134,13 +132,56 @@ public class NodeController implements AutoCloseable {
             }
         }
     }
-
     public boolean isAlive() {
         return process != null && process.isAlive();
     }
-
     @Override
     public void close() {
         crash();
+    }
+    public Path dataDir() {
+        return dataDir;
+    }
+    public boolean awaitExit(long timeoutMs) {
+        if (process == null) {
+            return true;
+        }
+        try {
+            return process.waitFor(timeoutMs, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
+    }
+    public boolean awaitLifecycle(String expectedLifecycle, long timeoutMs) {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                if (checkLifecycleState(expectedLifecycle)) {
+                    return true;
+                }
+            } catch (Exception e) {
+                // Ignoriše greške dok čvor ne postane dostupan
+            }
+            try {
+                Thread.sleep(100);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
+        return false;
+    }
+    private boolean checkLifecycleState(String expectedLifecycle) throws Exception {
+        URI uri = URI.create("http://localhost:" + adminPort + "/health/ready");
+        HttpRequest request = HttpRequest.newBuilder().uri(uri).GET().build();
+        HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+
+        // Ukoliko telo odgovora ili status odražava željeni ciklus (ili status 200 za READY)
+        if (expectedLifecycle.equalsIgnoreCase("READY") && response.statusCode() == 200) {
+            return true;
+        }
+        // Može se proveriti i direktno po sadržaju JSON-a ako status vraća lifecycle polje
+        return response.body() != null && response.body().contains(expectedLifecycle);
     }
 }
