@@ -376,8 +376,8 @@ Svaka sekcija ima isti oblik: cilj, šta pročitati, isporuke, failpoint-i, broj
 - [x] `MemTable`: `TreeMap`, čuva samo najveći `sequence` po ključu, `logicalBytes = 32 + len(key) + len(value)` (0 za tombstone i praznu vrednost), `generation`, `min/maxSequence`, `rotationRequired`. `ImmutableMemTable` kao pogled samo za čitanje (CP1 §10).
 - [x] `EngineMode` mašina stanja `RECOVERING → SERVING ⇄ BACKPRESSURED → FAILED` i `lastFatalError`. Iz `FAILED` nema povratka bez restarta (CP1 §22).
 - [x] Brave po CP1 §13.1: fer `ReentrantReadWriteLock engineLock`. Za backpressure se koristi `engineLock.writeLock().newCondition()`, jer `await` oslobađa bravu. Redosled brava se dokumentuje u `DESIGN.md`.
-- [ ] Put mutacije u **10 koraka** (CP1 §9) za `PUT` i `DELETE`: validacija pre bilo kakvog sporednog efekta → write lock → provera režima i backpressure-a sa rokom → dodela `sequence` → kodiranje → `WalSegment.append` → `WalSegment.force` → MemTable → vidljivost → odgovor. I/O greška u append ili force vodi u `FAILED`. *(Urađeno preko šava `MutationLog`; ostaje pravi `WalSegment` od Mateja.)*
-- [x] Rotacija u **4 koraka** (CP1 §10): novi WAL kroz `WalSegments.create` → zamrzavanje stare generacije → atomska zamena para (MemTable, WAL) → `FlushScheduler.flushNeeded()`. Najviše jedna immutable generacija; inače backpressure. *(Urađeno preko šava `WalFactory`; pravi `WalSegments.create` stiže sa WAL modulom.)*
+- [x] Put mutacije u **10 koraka** (CP1 §9) za `PUT` i `DELETE`: validacija pre bilo kakvog sporednog efekta → write lock → provera režima i backpressure-a sa rokom → dodela `sequence` → kodiranje → `WalSegment.append` → `WalSegment.force` → MemTable → vidljivost → odgovor. I/O greška u append ili force vodi u `FAILED`. *(Pravi `WalSegment` stoji iza šava `MutationLog`; čvor ga otvara kroz `RecoveryProcedure`.)*
+- [x] Rotacija u **4 koraka** (CP1 §10): novi WAL kroz `WalSegments.create` → zamrzavanje stare generacije → atomska zamena para (MemTable, WAL) → `FlushScheduler.flushNeeded()`. Najviše jedna immutable generacija; inače backpressure. *(Pravi `WalSegments` stoji iza šava `WalFactory`.)*
 - [x] `GET` (CP1 §11): aktivna → immutable → SSTable čiji opseg pokriva ključ. Bira se najveći `sequence`; tombstone daje `NOT_FOUND`. Čitanje drži read lock tokom cele pretrage.
 - [x] `MergingIterator` i `SCAN` (CP1 §12): min-heap, grupisanje **svih** verzija istog ključa, pobednik po najvećem `sequence`, tombstone se ne emituje i ne broji u `limit`, `endExclusive` se nikad ne emituje. Read lock se drži tokom celog skeniranja (osnova).
 - [x] `MaintenanceHost` za Ilijin flush i compaction (§5.1): nepromenljiv `EngineView`, zamena pogleda i buđenje pisaca pod write lock-om.
@@ -389,7 +389,7 @@ Svaka sekcija ima isti oblik: cilj, šta pročitati, isporuke, failpoint-i, broj
 
 **Polja statusa koja obezbeđuje:** `engineMode`, `writeBackpressure`, `backpressuredWriters`, `lastFatalError`, `nextSequence`, `activeMemtable`, `immutableMemtable`, `lastAcceptedSequence`, `lastDurableSequence`.
 
-**Testovi:** CP1-API-001, API-002, API-003, API-004, API-005, FLS-007 (backpressure), CMP-005 (trka flush-a i compaction-a; namerno testira Ilijin kod).
+**Testovi:** CP1-API-001, API-002, API-003, API-004, API-005, FLS-007 (backpressure), CMP-005 (trka flush-a i compaction-a; namerno testira Ilijin kod). ✅ Svi su napisani i prolaze u Docker-u (28.10.2026.); odgovori za odbranu su u `docs/odbrana/`.
 
 **Dokumentacija (`DESIGN.md`):** granice modula, tačka linearizacije i redosled WAL force-a, tabela brava i redosled preuzimanja, rotacija i backpressure, algoritmi `GET` i `SCAN`.
 
