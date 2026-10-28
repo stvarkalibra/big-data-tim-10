@@ -11,6 +11,7 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.Path;
+import java.util.Collection;
 import java.util.Objects;
 
 /**
@@ -27,6 +28,9 @@ import java.util.Objects;
  * Only after step 4 is the segment returned and may take records. A crash
  * before step 3 leaves a temporary file for recovery to remove; after it, a
  * valid header-only segment. Every step goes through {@link StorageIO}.
+ *
+ * <p>It also deletes segments that a flush covered, and keeps the
+ * {@link WalCatalog} of every segment it created or deleted.
  */
 public final class WalSegments implements WalFactory {
 
@@ -37,6 +41,7 @@ public final class WalSegments implements WalFactory {
     private final StorageStats stats;
     private final WalIdAllocator ids;
     private final JsonLog log;
+    private final WalCatalog catalog = new WalCatalog();
 
     public WalSegments(Path walDir, Path tmpDir, StorageIO io, Failpoints failpoints,
                        StorageStats stats, WalIdAllocator ids, JsonLog log) {
@@ -65,6 +70,9 @@ public final class WalSegments implements WalFactory {
                     ByteBuffer.wrap(WalCodec.encodeSegmentHeader(segmentId)), null, ctx);
             io.force(channel, null, ctx);
             io.atomicMoveNoReplace(temporary, published, null, ctx);
+            // In wal/ from here on, even if the directory force fails.
+            catalog.register(new WalCatalog.Segment(segmentId,
+                    WalFormat.SEGMENT_HEADER_BYTES, null, null));
             io.fsyncDirectory(walDir, null, ctx);
         } catch (IOException | RuntimeException e) {
             closeAfterFailure(channel, e);
@@ -73,7 +81,27 @@ public final class WalSegments implements WalFactory {
 
         // The open channel follows the file through the rename, so appends
         // continue right after the header at offset 24.
-        return new WalSegment(segmentId, channel, io, failpoints, stats, log);
+        return new WalSegment(segmentId, channel, io, failpoints, stats, catalog, log);
+    }
+
+    /**
+     * Deletes segments whose records are all at or below the manifest's
+     * {@code flushedThroughSequence}, then forces {@code lsm/wal/} (CP1 §19.1
+     * steps 12–13). Each deleted segment leaves the catalog at once; after a
+     * failure the remaining ones stay on disk and in the catalog until
+     * recovery deletes them.
+     */
+    public void retire(Collection<Long> segmentIds, OpContext ctx) throws IOException {
+        for (long segmentId : segmentIds) {
+            io.delete(walDir.resolve(WalFileNames.segmentFileName(segmentId)));
+            catalog.removed(segmentId);
+        }
+        io.fsyncDirectory(walDir, null, ctx);
+    }
+
+    /** The segments this node has on disk, for the storage status (CP1 §24). */
+    public WalCatalog catalog() {
+        return catalog;
     }
 
     private static void closeAfterFailure(FileChannel channel, Exception failure) {

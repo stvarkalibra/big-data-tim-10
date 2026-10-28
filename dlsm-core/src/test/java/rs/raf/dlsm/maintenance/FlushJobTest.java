@@ -4,6 +4,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import rs.raf.dlsm.common.ErrorCode;
 import rs.raf.dlsm.common.Lifecycle;
 import rs.raf.dlsm.common.StorageException;
 import rs.raf.dlsm.engine.Engine;
@@ -45,6 +46,7 @@ class FlushJobTest {
 
     private DataLayout layout;
     private FailpointRegistry failpoints;
+    private RecordingStorageIO io;
     private StorageStats stats;
     private ManifestManager manifests;
     private TableIdAllocator tableIds;
@@ -67,7 +69,7 @@ class FlushJobTest {
             Files.createDirectories(dir);
         }
         failpoints = new FailpointRegistry(true);
-        RecordingStorageIO io = new RecordingStorageIO(failpoints);
+        io = new RecordingStorageIO(failpoints);
         stats = new StorageStats();
         manifests = new ManifestManager(layout, io);
         manifests.publishInitialManifest(ctx());
@@ -302,6 +304,54 @@ class FlushJobTest {
         for (long id : input.walSegmentIds()) {
             assertTrue(Files.exists(layout.walDir().resolve(WalFileNames.segmentFileName(id))));
         }
+    }
+
+    // ===== WAL retirement through the WAL module (CP1 §19.1 steps 12–13) =====
+
+    @Test
+    void retirerGetsExactlyTheFlushedGenerationsSegments() throws Exception {
+        List<List<Long>> retired = new ArrayList<>();
+        job = jobWith((ids, ctx) -> retired.add(List.copyOf(ids)));
+        FlushInput input = freeze("alpha", "A");
+
+        job.flushOldest(null, ctx()).orElseThrow();
+
+        assertEquals(List.of(input.walSegmentIds()), retired);
+    }
+
+    // CP1-FLS-004: the failpoint fires before any WAL segment is touched.
+    @Test
+    void failpointBeforeWalDeleteFiresBeforeTheRetirer() throws Exception {
+        List<List<Long>> retired = new ArrayList<>();
+        job = jobWith((ids, ctx) -> retired.add(List.copyOf(ids)));
+        freeze("alpha", "A");
+        arm(FailpointNames.FLUSH_AFTER_MANIFEST_PUBLISH_BEFORE_WAL_DELETE, Action.IO_ERROR);
+
+        assertThrows(StorageException.class, () -> job.flushOldest(null, ctx()));
+
+        assertEquals(List.of(), retired);
+    }
+
+    // docs/ODLUKE.md, 23.10.2026: an error after the published flush fails the job only.
+    @Test
+    void retirerFailureFailsJobButEngineKeepsServing() throws Exception {
+        job = jobWith((ids, ctx) -> {
+            throw new IOException("delete failed");
+        });
+        freeze("alpha", "A");
+
+        StorageException error = assertThrows(StorageException.class,
+                () -> job.flushOldest(null, ctx()));
+
+        assertEquals(ErrorCode.STORAGE_IO, error.code());
+        assertEquals(Lifecycle.READY, engine.lifecycle());
+        assertEquals(1, diskManifest().generation());
+        assertEquals(1, stats.flushPublications.get());
+        assertEquals(Optional.of("A"), value("alpha"));
+    }
+
+    private FlushJob jobWith(WalRetirer wal) {
+        return new FlushJob(layout, io, failpoints, stats, manifests, tableIds, engine, progress, wal);
     }
 
     private void assertKeptOldState() throws Exception {

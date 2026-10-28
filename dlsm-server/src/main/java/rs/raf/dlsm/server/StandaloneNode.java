@@ -148,7 +148,7 @@ public final class StandaloneNode implements AutoCloseable {
                     (host, recovered) -> startMaintenance(host, recovered, failpoints, log),
                     OpContext.background());
             status = new NodeStatus(nodeId, opened, stats,
-                    () -> recovery.manifests().current(), progress);
+                    () -> recovery.manifests().current(), progress, recovery.walCatalog());
             return opened;
         } catch (StorageException e) {
             return failStartup(e, log);
@@ -180,8 +180,9 @@ public final class StandaloneNode implements AutoCloseable {
 
     private FlushScheduler startMaintenance(MaintenanceHost host, RecoveryResult recovered,
                                             Failpoints failpoints, JsonLog log) {
+        // Covered WAL segments are deleted through the WAL module, so its catalog follows.
         FlushJob flush = new FlushJob(layout, io, failpoints, stats, recovery.manifests(),
-                recovered.tableIds(), host, progress);
+                recovered.tableIds(), host, progress, recovered.wal().walFactory()::retire);
         CompactionJob compaction = new CompactionJob(layout, io, failpoints, stats, recovery.manifests(),
                 recovered.tableIds(), host, progress);
         MaintenanceWorker worker = new MaintenanceWorker(host, recovery.manifests(), flush, compaction, log);

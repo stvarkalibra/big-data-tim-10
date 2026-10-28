@@ -47,6 +47,7 @@ class WalSegmentFailpointTest {
     private final FailpointRegistry failpoints = new FailpointRegistry(true);
     private final ByteArrayOutputStream logOutput = new ByteArrayOutputStream();
     private StorageStats stats;
+    private WalCatalog catalog;
     private WalSegment segment;
     private Path file;
     /** File length L before the candidate mutation: base1 and base2 are durable. */
@@ -61,6 +62,7 @@ class WalSegmentFailpointTest {
                 new PrintStream(logOutput, true, StandardCharsets.UTF_8), Clock.systemUTC());
         WalSegments segments = new WalSegments(walDir, tmpDir, new RecordingStorageIO(failpoints),
                 failpoints, stats, WalIdAllocator.startingAt(1), log);
+        catalog = segments.catalog();
 
         segment = segments.createSegment(CTX);
         file = walDir.resolve(WalFileNames.segmentFileName(1));
@@ -130,6 +132,26 @@ class WalSegmentFailpointTest {
         assertEquals(WalScanResult.Status.TORN_TAIL, scan.status());
         assertEquals(baseLength, scan.tornFrameOffset());
         assertEquals(baseRecords(), scan.records());
+    }
+
+    // The status shows the real file size, but the prefix is no record (CP1 §24).
+    @Test
+    void catalogCountsThePrefixButNotItsSequence() throws IOException {
+        arm(FailpointNames.WAL_AFTER_RECORD_PREFIX, Action.IO_ERROR, Map.of("prefixBytes", "17"));
+
+        assertThrows(InjectedIOException.class, () -> segment.append(CANDIDATE, CTX));
+
+        assertEquals(List.of(new WalCatalog.Segment(1, baseLength + 17, 1L, 2L)),
+                catalog.snapshot());
+    }
+
+    @Test
+    void catalogIsUnchangedWhenNoByteWasWritten() throws IOException {
+        arm(FailpointNames.WAL_BEFORE_APPEND, Action.IO_ERROR, Map.of());
+
+        assertThrows(InjectedIOException.class, () -> segment.append(CANDIDATE, CTX));
+
+        assertEquals(List.of(new WalCatalog.Segment(1, baseLength, 1L, 2L)), catalog.snapshot());
     }
 
     // CP1-WAL-002 cut points: inside the guarded header, right after it, one byte before the end.

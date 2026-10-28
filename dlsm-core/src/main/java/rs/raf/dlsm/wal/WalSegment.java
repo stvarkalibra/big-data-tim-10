@@ -39,6 +39,7 @@ public final class WalSegment implements MutationLog {
     private final StorageIO io;
     private final Failpoints failpoints;
     private final StorageStats stats;
+    private final WalCatalog catalog;
     private final JsonLog log;
 
     /** First append or force failure; the tail is uncertain from then on. */
@@ -46,12 +47,13 @@ public final class WalSegment implements MutationLog {
     private volatile boolean closed;
 
     WalSegment(long segmentId, FileChannel channel, StorageIO io, Failpoints failpoints,
-               StorageStats stats, JsonLog log) {
+               StorageStats stats, WalCatalog catalog, JsonLog log) {
         this.segmentId = segmentId;
         this.channel = Objects.requireNonNull(channel, "channel");
         this.io = Objects.requireNonNull(io, "io");
         this.failpoints = Objects.requireNonNull(failpoints, "failpoints");
         this.stats = Objects.requireNonNull(stats, "stats");
+        this.catalog = Objects.requireNonNull(catalog, "catalog");
         this.log = Objects.requireNonNull(log, "log");
     }
 
@@ -75,7 +77,9 @@ public final class WalSegment implements MutationLog {
      *
      * The prefix length is the rule's {@code prefixBytes} parameter, kept
      * within {@code 1..frameLength-1}, or {@value #DEFAULT_PREFIX_BYTES}
-     * (the guarded length header) without one. Counters follow CP1 §24.
+     * (the guarded length header) without one. Counters follow CP1 §24; the
+     * catalog sees every written byte, but a sequence only once its frame is
+     * complete.
      */
     @Override
     public void append(InternalRecord record, OpContext ctx) throws IOException {
@@ -90,12 +94,15 @@ public final class WalSegment implements MutationLog {
             io.writeFully(channel, ByteBuffer.wrap(frame, 0, prefix),
                     FailpointNames.WAL_BEFORE_APPEND, ctx);
             stats.add("walBytesWritten", prefix);
+            catalog.written(segmentId, prefix);
 
             io.writeFully(channel, ByteBuffer.wrap(frame, prefix, frame.length - prefix),
                     FailpointNames.WAL_AFTER_RECORD_PREFIX, ctx);
             stats.add("walBytesWritten", frame.length - prefix);
+            catalog.written(segmentId, frame.length - prefix);
 
             stats.increment("walAppendsCompleted");
+            catalog.framed(segmentId, record.sequence());
         } catch (IOException | RuntimeException e) {
             markUncertain(e);
             throw e;

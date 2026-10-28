@@ -134,6 +134,23 @@ class WalSegmentTest {
         assertEquals(2, log.lastSequence().getAsLong());
     }
 
+    // ===== Catalog for the storage status (CP1 §24) =====
+
+    @Test
+    void catalogFollowsFileSizeAndSequences() throws IOException {
+        WalSegment first = newSegment();
+        first.append(InternalRecord.put("alpha", 4, new byte[30]), CTX);
+        first.append(InternalRecord.delete("beta", 5), CTX);
+        first.force(CTX);
+        WalSegment second = newSegment();
+
+        assertEquals(List.of(
+                        new WalCatalog.Segment(1, Files.size(fileOf(first)), 4L, 5L),
+                        new WalCatalog.Segment(2, WalFormat.SEGMENT_HEADER_BYTES, null, null)),
+                segments.catalog().snapshot());
+        assertEquals(WalFormat.SEGMENT_HEADER_BYTES, Files.size(fileOf(second)));
+    }
+
     // ===== StorageIO calls =====
 
     @Test
