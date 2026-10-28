@@ -20,7 +20,6 @@ import rs.raf.dlsm.sstable.DiskSSTableTableSource;
 import rs.raf.dlsm.sstable.SSTableDiskWriter;
 import rs.raf.dlsm.sstable.SSTableMeta;
 import rs.raf.dlsm.stats.StorageStats;
-import rs.raf.dlsm.wal.WalFileNames;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -45,10 +44,20 @@ public final class FlushJob {
     private final TableIdAllocator tableIds;
     private final MaintenanceHost host;
     private final MaintenanceProgress progress;
+    private final WalRetirer wal;
 
+    /** Deletes covered WAL files directly, without a WAL catalog; for engine tests over {@code InMemoryWal}. */
     public FlushJob(DataLayout layout, StorageIO io, Failpoints failpoints, StorageStats stats,
                     ManifestManager manifests, TableIdAllocator tableIds,
                     MaintenanceHost host, MaintenanceProgress progress) {
+        this(layout, io, failpoints, stats, manifests, tableIds, host, progress,
+                WalRetirer.deletingFiles(layout, io));
+    }
+
+    /** @param wal deletes covered WAL segments; the node passes {@code WalSegments::retire} */
+    public FlushJob(DataLayout layout, StorageIO io, Failpoints failpoints, StorageStats stats,
+                    ManifestManager manifests, TableIdAllocator tableIds,
+                    MaintenanceHost host, MaintenanceProgress progress, WalRetirer wal) {
         this.layout = Objects.requireNonNull(layout, "layout");
         this.io = Objects.requireNonNull(io, "io");
         this.failpoints = Objects.requireNonNull(failpoints, "failpoints");
@@ -57,6 +66,7 @@ public final class FlushJob {
         this.tableIds = Objects.requireNonNull(tableIds, "tableIds");
         this.host = Objects.requireNonNull(host, "host");
         this.progress = Objects.requireNonNull(progress, "progress");
+        this.wal = Objects.requireNonNull(wal, "wal");
     }
 
     MaintenanceProgress progress() {
@@ -150,10 +160,7 @@ public final class FlushJob {
 
     private void retireWal(FlushInput input, OpContext ctx) throws IOException {
         failpoints.hit(FailpointNames.FLUSH_AFTER_MANIFEST_PUBLISH_BEFORE_WAL_DELETE, ctx);
-        for (long segmentId : input.walSegmentIds()) {
-            io.delete(layout.walDir().resolve(WalFileNames.segmentFileName(segmentId)));
-        }
-        io.fsyncDirectory(layout.walDir(), null, ctx);
+        wal.retire(input.walSegmentIds(), ctx);
     }
 
     private StorageException fatal(FlushInput input, Throwable cause) {
