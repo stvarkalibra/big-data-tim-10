@@ -92,6 +92,7 @@ public final class Cp1Wal004 {
     public static void run(long seed, Report report) throws Exception {
         runBeforeAppend(seed);
         runAfterPrefix(seed);
+        runBeforeSync(seed);
         report.pass();
     }
 
@@ -178,6 +179,52 @@ public final class Cp1Wal004 {
             } catch (NoSuchFileException deletedByFlush) {
                 // Allowed: its records are published in a table by now.
             }
+        }
+    }
+
+    /**
+     * (c): the frame is complete, but its force failed, so its durability is
+     * unknown. After the restart the candidate is exactly {@code C} or absent;
+     * which one is decided by what the kill left on disk, because replay never
+     * drops a valid complete frame (CP1 §21.3).
+     */
+    private static void runBeforeSync(long seed) throws Exception {
+        Subcase subcase = Subcase.BEFORE_SYNC;
+        byte[] base = ascii("V-" + seed);
+        byte[] candidate = ascii("C-" + seed);
+        int frameLength = FRAME_OVERHEAD + CANDIDATE.length() + candidate.length;
+        String at = " " + subcase.label;
+
+        try (WalScenarioNode node = WalScenarioNode.create(ID, seed, PUBLIC_PORT, ADMIN_PORT)) {
+            Prepared prepared = prepare(node, base);
+            JsonNode stats = failCandidate(node, seed, subcase, prepared, candidate, """
+                    {"name": "wal.after-append.before-sync", "action": "IO_ERROR",
+                     "filters": {"requestId": "%s"}}
+                    """);
+
+            expectCounter(node, stats, "walAppendAttempts", 1, at);
+            expectCounter(node, stats, "walAppendsCompleted", 1, at);
+            expectCounter(node, stats, "walBytesWritten", frameLength, at);
+            expectCounter(node, stats, "walForceAttempts", 1, at);
+            expectCounter(node, stats, "walForcesSucceeded", 0, at);
+            long length = Files.size(prepared.segmentFile());
+            node.check(length == prepared.baseLength() + frameLength, "segment after the failure" + at,
+                    "length " + length + ", expected " + (prepared.baseLength() + frameLength));
+
+            // Either complete model is allowed, never corruption or a partial value.
+            node.kill();
+            WalScenarioNode.WalInspection inspection = node.inspectWal();
+            JsonNode wal = inspection.report();
+            String walStatus = wal.path("status").asText();
+            long lastKept = wal.path("lastSequence").asLong();
+            node.check(inspection.exitCode() == 0
+                            && ("VALID".equals(walStatus) || "TORN_TAIL".equals(walStatus))
+                            && (lastKept == 1 || lastKept == 2),
+                    "inspect wal before recovery" + at, wal.toString());
+            boolean candidateKept = lastKept == 2;
+
+            expectRecovered(node, seed, subcase, prepared, base, candidateKept ? candidate : null,
+                    lastKept, "TORN_TAIL".equals(walStatus) ? 1 : 0);
         }
     }
 
