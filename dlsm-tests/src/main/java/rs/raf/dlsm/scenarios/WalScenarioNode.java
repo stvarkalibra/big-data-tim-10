@@ -167,6 +167,16 @@ final class WalScenarioNode implements AutoCloseable {
         return api.get(key, nextRequestId(), TIMEOUT_MS);
     }
 
+    /** The raw {@code PUT} response, for a mutation that must fail (CP1-WAL-004). */
+    HttpResponse<String> rawPut(String key, byte[] value, String requestId) throws Exception {
+        return api.put(key, value, requestId, TIMEOUT_MS);
+    }
+
+    /** The raw {@code DELETE} response, for a node that must refuse it. */
+    HttpResponse<String> rawDelete(String key) throws Exception {
+        return api.delete(key, nextRequestId(), TIMEOUT_MS);
+    }
+
     // ===== Admin API =====
 
     /** {@code GET /admin/v1/storage/status} (CP1 §24); must answer {@code 200}. */
