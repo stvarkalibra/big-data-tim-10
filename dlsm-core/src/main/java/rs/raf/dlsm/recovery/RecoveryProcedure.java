@@ -20,6 +20,7 @@ import rs.raf.dlsm.sstable.SSTableMeta;
 import rs.raf.dlsm.sstable.SSTableRecoveryVerifier;
 import rs.raf.dlsm.sstable.SSTableValidator;
 import rs.raf.dlsm.stats.StorageStats;
+import rs.raf.dlsm.wal.WalCatalog;
 import rs.raf.dlsm.wal.WalIdAllocator;
 
 import java.io.IOException;
@@ -55,6 +56,7 @@ public final class RecoveryProcedure implements AutoCloseable {
     private final ManifestManager manifests;
 
     private DataDirectory directory;
+    private volatile WalCatalog walCatalog;
 
     /**
      * Creates the flush and compaction worker once the engine exists. The
@@ -156,6 +158,7 @@ public final class RecoveryProcedure implements AutoCloseable {
                 + " WAL keys; next sequence " + (wal.lastUsedSequence() + 1));
         log.info("RECOVERY_COMPLETE", fields);
 
+        walCatalog = wal.walFactory().catalog();
         return new RecoveryResult(directory.foundState(), manifest, tables, tableIds, wal);
     }
 
@@ -312,6 +315,20 @@ public final class RecoveryProcedure implements AutoCloseable {
     /** The manifest module, loaded by recovery; maintenance publishes through it. */
     public ManifestManager manifests() {
         return manifests;
+    }
+
+    /**
+     * The WAL segments on disk, kept up to date by the segments recovery
+     * opened; the storage status reads it (CP1 §24).
+     *
+     * @throws IllegalStateException before recovery has succeeded
+     */
+    public WalCatalog walCatalog() {
+        WalCatalog catalog = walCatalog;
+        if (catalog == null) {
+            throw new IllegalStateException("Recovery has not succeeded");
+        }
+        return catalog;
     }
 
     /** True once step 1 ran and while this process owns the directory. */

@@ -148,7 +148,7 @@ public final class StandaloneNode implements AutoCloseable {
                     (host, recovered) -> startMaintenance(host, recovered, failpoints, log),
                     OpContext.background());
             status = new NodeStatus(nodeId, opened, stats,
-                    () -> recovery.manifests().current(), progress);
+                    () -> recovery.manifests().current(), progress, recovery.walCatalog());
             return opened;
         } catch (StorageException e) {
             return failStartup(e, log);

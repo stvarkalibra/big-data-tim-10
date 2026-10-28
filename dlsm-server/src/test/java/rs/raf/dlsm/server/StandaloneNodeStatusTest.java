@@ -8,6 +8,7 @@ import org.junit.jupiter.api.io.TempDir;
 import rs.raf.dlsm.failpoint.FailpointNames;
 import rs.raf.dlsm.failpoint.FailpointRegistry;
 import rs.raf.dlsm.log.JsonLog;
+import rs.raf.dlsm.wal.WalFileNames;
 
 import java.io.ByteArrayOutputStream;
 import java.io.PrintStream;
@@ -16,6 +17,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.util.Base64;
@@ -199,6 +201,101 @@ class StandaloneNodeStatusTest {
         assertEquals("NO_OP", admin("POST", "/admin/v1/storage/flush").get("result").asText());
         assertEquals(1, admin("GET", "/admin/v1/storage/status")
                 .get("manifest").get("generation").asLong());
+    }
+
+    // ===== walSegments: the WAL module's catalog (CP1 §24) =====
+
+    private long segmentSize(long segmentId) throws Exception {
+        return Files.size(dataDir.resolve("lsm").resolve("wal")
+                .resolve(WalFileNames.segmentFileName(segmentId)));
+    }
+
+    private JsonNode storageStatus() {
+        try {
+            return admin("GET", "/admin/v1/storage/status");
+        } catch (Exception e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    private static void assertSegment(JsonNode segment, long id, String role, Long min, Long max,
+                                      long size) {
+        assertEquals(id, segment.get("segmentId").asLong(), segment.toString());
+        assertEquals(role, segment.get("role").asText(), segment.toString());
+        assertEquals(min, segment.get("minSequence").isNull() ? null
+                : segment.get("minSequence").asLong(), segment.toString());
+        assertEquals(max, segment.get("maxSequence").isNull() ? null
+                : segment.get("maxSequence").asLong(), segment.toString());
+        assertEquals(size, segment.get("sizeBytes").asLong(), segment.toString());
+    }
+
+    @Test
+    void activeSegmentHasItsRealSizeAndSequences() throws Exception {
+        start(1 << 20);
+        JsonNode fresh = storageStatus().get("walSegments");
+        assertEquals(1, fresh.size(), fresh.toString());
+        assertSegment(fresh.get(0), 1, "ACTIVE", null, null, 24);
+
+        put("alpha", "A");
+        put("beta", "B");
+
+        JsonNode wal = storageStatus().get("walSegments");
+        assertEquals(1, wal.size(), wal.toString());
+        assertSegment(wal.get(0), 1, "ACTIVE", 1L, 2L, segmentSize(1));
+    }
+
+    // CP1-FLS-001/004: published and covered, but not deleted yet.
+    @Test
+    void coveredSegmentIsPendingDeleteUntilTheFlushDeletesIt() throws Exception {
+        start(new ServerConfig("standalone", 0, 0, 1 << 20).withDataDir(dataDir)
+                .withTestMode(true));
+        FailpointRegistry failpoints = node.failpointRegistry().orElseThrow();
+        failpoints.addRule(new FailpointRegistry.Rule("pause-delete",
+                FailpointNames.FLUSH_AFTER_MANIFEST_PUBLISH_BEFORE_WAL_DELETE,
+                FailpointRegistry.Action.PAUSE, 0, 1, 30_000, Map.of()));
+        put("alpha", "A");
+        long covered = segmentSize(1);
+
+        CompletableFuture<HttpResponse<String>> flush = CompletableFuture.supplyAsync(() -> {
+            try {
+                return send(node.adminPort(), "POST", "/admin/v1/storage/flush", null);
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+        });
+        awaitTrue(() -> failpoints.stateOf("pause-delete") == FailpointRegistry.State.TRIGGERED,
+                "the flush never reached the WAL delete");
+
+        JsonNode pending = storageStatus().get("walSegments");
+        assertEquals(2, pending.size(), pending.toString());
+        assertSegment(pending.get(0), 1, "COVERED_PENDING_DELETE", 1L, 1L, covered);
+        assertSegment(pending.get(1), 2, "ACTIVE", null, null, 24);
+
+        assertTrue(failpoints.releaseRule("pause-delete"));
+        assertEquals(200, flush.get(5, TimeUnit.SECONDS).statusCode());
+        JsonNode after = storageStatus().get("walSegments");
+        assertEquals(1, after.size(), after.toString());
+        assertSegment(after.get(0), 2, "ACTIVE", null, null, 24);
+        assertFalse(Files.exists(dataDir.resolve("lsm").resolve("wal")
+                .resolve(WalFileNames.segmentFileName(1))));
+    }
+
+    // Recovery registers the kept segment, and the flush after READY retires it.
+    @Test
+    void recoveredSegmentLeavesTheStatusOnceItsFlushDeletesIt() throws Exception {
+        start(1 << 20);
+        put("alpha", "A");
+        put("beta", "B");
+        node.close();
+
+        start(1 << 20);
+        awaitTrue(() -> {
+            JsonNode wal = storageStatus().get("walSegments");
+            return wal.size() == 1 && wal.get(0).get("segmentId").asLong() == 2;
+        }, "the recovered segment was never retired");
+
+        assertSegment(storageStatus().get("walSegments").get(0), 2, "ACTIVE", null, null, 24);
+        assertEquals(2, storageStatus().get("manifest").get("flushedThroughSequence").asLong());
     }
 
     @Test
