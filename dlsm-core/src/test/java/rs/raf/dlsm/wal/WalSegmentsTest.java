@@ -182,6 +182,77 @@ class WalSegmentsTest {
         assertEquals(List.of(), names(walDir));
     }
 
+    // ===== Catalog of segments on disk =====
+
+    @Test
+    void createdSegmentIsInTheCatalogAsHeaderOnly() throws IOException {
+        WalSegments segments = segments(new RecordingStorageIO(new NoOpFailpoints()),
+                WalIdAllocator.startingAt(3));
+
+        try (WalSegmentHandle ignored = new WalSegmentHandle(segments.createSegment(CTX))) {
+            assertEquals(List.of(new WalCatalog.Segment(3, WalFormat.SEGMENT_HEADER_BYTES,
+                    null, null)), segments.catalog().snapshot());
+        }
+    }
+
+    @Test
+    void failedMoveLeavesNothingInTheCatalog() {
+        WalSegments segments = segments(new RecordingStorageIO(new NoOpFailpoints())
+                .failOn("atomicMoveNoReplace"), WalIdAllocator.startingAt(1));
+
+        assertThrows(IOException.class, () -> segments.createSegment(CTX));
+        assertEquals(List.of(), segments.catalog().snapshot());
+    }
+
+    // The final name exists in wal/, so the status must show it until recovery deletes it.
+    @Test
+    void failedDirectoryForceKeepsTheFinalSegmentInTheCatalog() {
+        WalSegments segments = segments(new RecordingStorageIO(new NoOpFailpoints())
+                .failOn("fsyncDirectory"), WalIdAllocator.startingAt(1));
+
+        assertThrows(IOException.class, () -> segments.createSegment(CTX));
+        assertEquals(List.of(1L), segments.catalog().snapshot().stream()
+                .map(WalCatalog.Segment::segmentId).toList());
+    }
+
+    // ===== Retiring covered segments (CP1 §19.1 steps 12–13) =====
+
+    @Test
+    void retireDeletesSegmentsThenForcesTheWalDirectory() throws IOException {
+        RecordingStorageIO io = new RecordingStorageIO(new NoOpFailpoints());
+        WalSegments segments = segments(io, WalIdAllocator.startingAt(1));
+        segments.createSegment(CTX).close();
+        segments.createSegment(CTX).close();
+        try (WalSegmentHandle active = new WalSegmentHandle(segments.createSegment(CTX))) {
+            io.clearCalls();
+
+            segments.retire(List.of(1L, 2L), CTX);
+
+            assertEquals(List.of(
+                    "delete " + WalFileNames.segmentFileName(1),
+                    "delete " + WalFileNames.segmentFileName(2),
+                    "fsyncDirectory wal"), io.calls());
+            assertEquals(List.of(WalFileNames.segmentFileName(3)), names(walDir));
+            assertEquals(List.of(3L), segments.catalog().snapshot().stream()
+                    .map(WalCatalog.Segment::segmentId).toList());
+        }
+    }
+
+    // A segment that is still on disk stays visible, e.g. as COVERED_PENDING_DELETE.
+    @Test
+    void failedDeleteKeepsTheSegmentInTheCatalog() throws IOException {
+        RecordingStorageIO io = new RecordingStorageIO(new NoOpFailpoints());
+        WalSegments segments = segments(io, WalIdAllocator.startingAt(1));
+        segments.createSegment(CTX).close();
+        io.failOn("delete");
+
+        assertThrows(IOException.class, () -> segments.retire(List.of(1L), CTX));
+
+        assertEquals(List.of(WalFileNames.segmentFileName(1)), names(walDir));
+        assertEquals(List.of(1L), segments.catalog().snapshot().stream()
+                .map(WalCatalog.Segment::segmentId).toList());
+    }
+
     // ===== Real storage, including the directory force (Linux and Docker) =====
 
     @Test
