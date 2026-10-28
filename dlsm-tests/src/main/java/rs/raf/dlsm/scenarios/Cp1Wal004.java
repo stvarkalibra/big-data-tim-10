@@ -7,6 +7,7 @@ import rs.raf.dlsm.harness.Report;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.Locale;
@@ -90,6 +91,7 @@ public final class Cp1Wal004 {
 
     public static void run(long seed, Report report) throws Exception {
         runBeforeAppend(seed);
+        runAfterPrefix(seed);
         report.pass();
     }
 
@@ -123,6 +125,59 @@ public final class Cp1Wal004 {
                     "inspect wal before recovery" + at, wal.toString());
 
             expectRecovered(node, seed, subcase, prepared, base, null, 1, 0);
+        }
+    }
+
+    /**
+     * (b): the error comes after a strict prefix of the candidate's frame,
+     * which stays on disk as a torn tail that recovery cuts once.
+     */
+    private static void runAfterPrefix(long seed) throws Exception {
+        Subcase subcase = Subcase.AFTER_PREFIX;
+        byte[] base = ascii("V-" + seed);
+        byte[] candidate = ascii("C-" + seed);
+        int frameLength = FRAME_OVERHEAD + CANDIDATE.length() + candidate.length;
+        // Any strict prefix, from inside the guarded length to one byte short.
+        int prefix = 1 + (int) Math.floorMod(seed, (long) frameLength - 1);
+        String at = " " + subcase.label + " prefixBytes " + prefix;
+
+        try (WalScenarioNode node = WalScenarioNode.create(ID, seed, PUBLIC_PORT, ADMIN_PORT)) {
+            Prepared prepared = prepare(node, base);
+            JsonNode stats = failCandidate(node, seed, subcase, prepared, candidate, """
+                    {"name": "wal.after-record-prefix", "action": "IO_ERROR",
+                     "filters": {"requestId": "%%s"}, "parameters": {"prefixBytes": %d}}
+                    """.formatted(prefix));
+
+            expectCounter(node, stats, "walAppendAttempts", 1, at);
+            expectCounter(node, stats, "walAppendsCompleted", 0, at);
+            expectCounter(node, stats, "walBytesWritten", prefix, at);
+            expectCounter(node, stats, "walForceAttempts", 0, at);
+            long length = Files.size(prepared.segmentFile());
+            node.check(length == prepared.baseLength() + prefix, "segment after the failure" + at,
+                    "length " + length + ", expected " + (prepared.baseLength() + prefix));
+
+            node.kill();
+            WalScenarioNode.WalInspection inspection = node.inspectWal();
+            JsonNode wal = inspection.report();
+            node.check(inspection.exitCode() == 0 && "TORN_TAIL".equals(wal.path("status").asText())
+                            && wal.path("tornSegmentId").asLong() == prepared.segmentId()
+                            && wal.path("lastSequence").asLong() == 1,
+                    "inspect wal before recovery" + at, wal.toString());
+            JsonNode tornTail = segmentReport(wal, prepared.segmentId()).path("tornTail");
+            node.check(tornTail.path("frameOffset").asLong() == prepared.baseLength(),
+                    "inspect wal before recovery" + at, "torn frame at "
+                            + tornTail.path("frameOffset") + ", expected " + prepared.baseLength());
+
+            expectRecovered(node, seed, subcase, prepared, base, null, 1, 1);
+
+            // Cut exactly at L; a flush after READY may already have deleted the segment.
+            try {
+                long repaired = Files.size(prepared.segmentFile());
+                node.check(repaired == prepared.baseLength(), "repaired segment" + at,
+                        "length " + repaired + ", expected " + prepared.baseLength());
+            } catch (NoSuchFileException deletedByFlush) {
+                // Allowed: its records are published in a table by now.
+            }
         }
     }
 
@@ -232,6 +287,15 @@ public final class Cp1Wal004 {
     }
 
     // ===== Checks =====
+
+    private static JsonNode segmentReport(JsonNode wal, long segmentId) {
+        for (JsonNode segment : wal.path("segments")) {
+            if (segment.path("segmentId").asLong() == segmentId) {
+                return segment;
+            }
+        }
+        throw new AssertionError(ID + " ORACLE inspect wal: no segment " + segmentId + " in " + wal);
+    }
 
     private static void expectCounter(WalScenarioNode node, JsonNode stats, String name,
                                       long expected, String at) {
