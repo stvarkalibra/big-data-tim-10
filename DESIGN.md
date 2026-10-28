@@ -13,9 +13,9 @@ Urednik fajla je Ilija (plan §15); svaki odeljak piše vlasnik dela sistema.
 | algoritmi čitanja i spajanja skeniranja | §5 | Mladen, Kimi (SSTable) | engine deo popunjen |
 | objavljivanje pri flush-u i compaction-u | §6 | Ilija | popunjeno |
 | oporavak i politika oštećenja | §7 | Matej | popunjeno |
-| status i brojači | §8 | Kimi | čeka |
+| status i brojači | §8 | Kimi | popunjeno |
 | failpoint-i i arhitektura testova | §9 | Andrija | čeka |
-| namerna odstupanja od preporuka | §10 | svi | popunjeno za Mladenov i Matejev deo |
+| namerna odstupanja od preporuka | §10 | svi | popunjeno za Mladenov, Matejev i Ilijin deo |
 
 ---
 
@@ -33,23 +33,23 @@ Mehanizam se konfiguriše isključivo kroz `EngineConfig` i ulaz za oporavak (`R
 
 ### 1.2 Paketi i vlasništvo
 
-Vlasništvo je u planu §4.3. Ukratko: `common` i `engine` (Mladen), `wal` i oporavak (Matej), `sstable`, `stats`, `log` (Kimi), manifest i održavanje (Ilija), `io`, failpoint-i i `dlsm-tests` (Andrija); `dlsm-server` je Mladenov, a admin rute za status i failpoint-e dodaju Kimi i Andrija.
+Vlasništvo je u planu §4.3. Ukratko: `common` i `engine` (Mladen), `wal` i oporavak (Matej), `sstable`, `stats`, `log` (Kimi), manifest i održavanje (Ilija), `io`, failpoint-i i `dlsm-tests` (Andrija); `dlsm-server` je Mladenov; admin rute za status (`StorageStatusRoutes`) su Kimijeve, za flush i compaction (`MaintenanceRoutes`) Ilijine, a failpoint API (`FailpointRoutes`) pripada failpoint okviru (Andrija).
 
 ### 1.3 Šavovi između modula
 
-Moduli razgovaraju samo preko malih interfejsa u `rs.raf.dlsm.engine`. Svaki šav ima privremenu implementaciju dok pravi deo ne stigne (plan §11, pravilo stubova).
+Moduli razgovaraju samo preko malih interfejsa u `rs.raf.dlsm.engine`. Svaki šav je u početku imao privremenu implementaciju dok pravi deo nije stigao (plan §11, pravilo stubova); privremene su ostale samo za unit testove mehanizma.
 
-| Šav | Šta prenosi | Koristi | Implementira | Privremeno (M1) |
+| Šav | Šta prenosi | Koristi | Prava implementacija | Samo u unit testovima |
 |---|---|---|---|---|
-| `MutationLog` | jedan WAL segment: `append`, `force`, `segmentId`, `close` | engine | WAL modul | `InMemoryWal` (ne čuva ništa) |
-| `WalFactory` | stvaranje sledećeg segmenta po CP1 §16.1 | engine (rotacija) | WAL modul | `InMemoryWal` |
-| `TableSource` | jedna objavljena SSTable: `meta`, `get`, `iterator(start)` | engine (GET, SCAN) | SSTable modul (`DiskSSTableTableSource`) | `MemoryTable` |
+| `MutationLog` | jedan WAL segment: `append`, `force`, `segmentId`, `close` | engine | `WalSegment` (WAL modul) | `InMemoryWal` |
+| `WalFactory` | stvaranje sledećeg segmenta po CP1 §16.1 | engine (rotacija) | `WalSegments` | `InMemoryWal` |
+| `TableSource` | jedna objavljena SSTable: `meta`, `get`, `iterator(start)` | engine (GET, SCAN) | `DiskSSTableTableSource` (SSTable modul) | `MemoryTable` |
 | `MaintenanceHost` | ono što flush i compaction smeju da traže od mehanizma | održavanje | engine | — |
-| `FlushScheduler` | „zamrznuta generacija čeka flush“, provera auto-compaction-a | engine | održavanje | `InMemoryFlusher` |
-| `RecoveredState` + `Engine.open` | oporavljeno stanje → spreman mehanizam | oporavak | engine | `RecoveredState.empty` |
-| `EngineStatus` | konzistentan snimak polja mehanizma za status | status rute | engine | `NodeStatus` dopunjuje WAL/manifest delove |
+| `FlushScheduler` | „zamrznuta generacija čeka flush“, provera auto-compaction-a | engine | `MaintenanceWorker` (održavanje) | `InMemoryFlusher`, `FlushScheduler.NONE` |
+| `RecoveredState` + `Engine.open` | oporavljeno stanje → spreman mehanizam | oporavak | `RecoveryProcedure` | `RecoveredState.empty` |
+| `EngineStatus` | konzistentan snimak polja mehanizma za status | status rute | engine; `NodeStatus` ga spaja sa WAL katalogom, manifestom i stanjem održavanja | — |
 
-Dok traje M1, `Engine.openInMemory` sastavlja mehanizam od privremenih delova: podaci postoje samo u memoriji, a zamrznute generacije se „flush-uju“ u `MemoryTable` kroz isti `MaintenanceHost` tok kao pravi flush.
+Čvor (`StandaloneNode`) uvek otvara pravi mehanizam: `RecoveryProcedure` nad `DLSM_DATA_DIR`, sa `MaintenanceWorker`-om koji izvršava flush i compaction (§6, §7). `Engine.openInMemory` sastavlja mehanizam od privremenih delova i koristi se samo u unit testovima mehanizma.
 
 ---
 
@@ -81,6 +81,14 @@ Dok traje M1, `Engine.openInMemory` sastavlja mehanizam od privremenih delova: p
 | `apply` padne posle uspešnog force-a | `FAILED` (zapis je trajan, a memorija više ne odgovara WAL-u) | `500 INTERNAL_ERROR` |
 
 Svaki prelazak u `FAILED` čuva **prvu** grešku kao `lastFatalError` i odmah budi pisce koji čekaju (§3, §4). Iz `FAILED` nema povratka bez restarta (CP1 §22).
+
+**Failpoint-i na putu mutacije** (CP1 §26.1, `Engine.failpoint`): `wal.after-sync.before-memtable` je posle uspešnog force-a, a pre koraka 8; `memtable.after-apply.before-response` je posle koraka 8, a pre odgovora. Oba su pod write lock-om, pa `PAUSE` na njima zadržava i sledeće pisce i čitaoce (CP1-API-004). Ubrizgane greške (`docs/ODLUKE.md`, redovi od 20.10. i 22.10.2026.):
+
+| Akcija | `wal.after-sync.before-memtable` | ostale tačke mehanizma |
+|---|---|---|
+| `IO_ERROR` (nije u katalogu za ove tačke) | `FAILED`, `500 INTERNAL_ERROR` | `FAILED`, `500 INTERNAL_ERROR` |
+| `RETURN_ERROR` | `FAILED`: zapis je trajan, a nije primenjen | samo ta operacija dobija `500 INTERNAL_ERROR` sa kategorijom iz `errorCode`; mehanizam radi dalje |
+| istekao `PAUSE` | `FAILED` | samo ta operacija dobija `504 DEADLINE_EXCEEDED` |
 
 Za status: `lastAcceptedSequence` je najveći redni broj vidljiv u mehanizmu, a `lastDurableSequence` najveći redni broj nad kojim je force uspeo ili koji je u objavljenoj tabeli (CP1 §24). Oba se čitaju u istom snimku (`Engine.status`).
 
@@ -137,6 +145,8 @@ Mehanizam ima tačno jednu aktivnu MemTable i najviše jednu zamrznutu (CP1 §10
 2. `active.freeze(List.of(activeLog.segmentId()))` — stara generacija postaje nepromenljiva zajedno sa ID-jem segmenta koji je štiti.
 3. Zamena para i pogleda u jednoj izmeni: nova prazna MemTable, novi segment, nov `EngineView` sa zamrznutom generacijom. Ovo je tačka linearizacije rotacije; stari segment se zatvara.
 4. `flushScheduler.flushNeeded()`.
+
+Failpoint `rotation.after-new-wal-sync.before-switch` je između koraka 1 i 2: kod `RETURN_ERROR` se nov segment zatvara, a stari par ostaje važeći. `rotation.after-switch.before-flush` je između koraka 3 i 4: zamena je već izvršena, pa se i posle ubrizgane greške flush ipak traži, da zamrznuta generacija ne bi zauvek držala slot. Mutacija koja je pokrenula rotaciju još nema redni broj, pa posle pada na ovim tačkama mora biti odsutna (`docs/odbrana/dodatak-a-mehanizam.md`).
 
 Rotacija se pokreće automatski (u koraku 3 puta mutacije, kad je aktivna puna i slot slobodan) ili ručno, za ručni flush (`rotateIfActiveContainsUpTo`, CP1 §23.1).
 
@@ -385,7 +395,7 @@ Niz `walSegments` (CP1 §24) dolazi iz `wal.WalCatalog`, spiska segmenata koji s
 
 > **Piše Andrija** (CP1 §26, §28).
 
-Mesta failpoint-a u mehanizmu su obeležena komentarom `// failpoint: <ime>` u `Engine`: `wal.after-sync.before-memtable` i `memtable.after-apply.before-response` (`mutate`), `rotation.after-new-wal-sync.before-switch` i `rotation.after-switch.before-flush` (`rotateLocked`), `scan.after-snapshot.before-merge` (`scan`).
+Mesta failpoint-a u mehanizmu su pozivi `Engine.failpoint(ime, ctx)`: `wal.after-sync.before-memtable` i `memtable.after-apply.before-response` (`mutate`), `rotation.after-new-wal-sync.before-switch` i `rotation.after-switch.before-flush` (`rotateLocked`), `scan.after-snapshot.before-merge` (`scan`). Ponašanje ubrizganih grešaka na njima je u §2 i §4.2.
 
 ---
 

@@ -29,6 +29,14 @@ Gotovo sav kod i testovi iz Mladenovih grana nastali su u radu sa AI alatom, com
 | `mladen/inspect-cli`, `mladen/engine-open` | `InspectCommand`, `RecoveredState`, `Engine.open` |
 | `mladen/sstable-reads` | testovi mehanizma nad pravim SSTable fajlovima |
 | `mladen/design-docs` | Mladenovi odeljci `DESIGN.md` (§1–§5, §10) |
+| `mladen/engine-failpoints` | pet failpoint-a mehanizma iz `EngineConfig`, `TEST_MODE` u `ServerConfig` i `StandaloneNode` |
+| paket za Andriju (ušao kroz `andrija/otherFixes201026`) | `InjectedFailureException`, `FailpointCatalog`, dorađen `FailpointRegistry`, `FailpointRoutes`, dopune `AdminClient`; Andrija ih je pregledao i uneo |
+| `mladen/failpoint-wiring` | failpoint API u `StandaloneNode` (samo uz `TEST_MODE=true`), `RETURN_ERROR` i istek pauze u `Engine`, testovi failpoint okvira i ruta |
+| `mladen/harness-runner-fixes`, `mladen/report-format`, `mladen/scenario-ids` | ishod scenarija iz izveštaja i izlazni kodovi u `ScenarioRunner`, izveštaj pokretanja po PI §25.3 (`SuiteReport`), svih 33 ID-ja sa `SKIPPED` za neurađene, prvi unit testovi u `dlsm-tests` |
+| `mladen/dbctl-test`, `mladen/platform-fixes` | izvršni jar za `dlsm-tests`, `student-tests` Docker slika, `dbctl test` u kontejneru, `dbctl up` koji čeka spremnost, `dbctl inspect` u pomoćnom kontejneru, `.gitattributes`, izvršni `mvnw`/`dbctl` |
+| `mladen/status-real-parts` | status sa pravim manifestom i stanjem održavanja (`NodeStatus`), konzistentno sa pogledom mehanizma |
+| `mladen/scenario-api-001` … `mladen/scenario-api-005`, `mladen/fls-007`, `mladen/cmp-005` | scenariji CP1-API-001–005, CP1-FLS-007 i CP1-CMP-005; `NodeController.withEnvironment` |
+| `mladen/defense-notes` | `docs/odbrana/` za Mladenove scenarije i Dodatak A za pet failpoint-a mehanizma |
 
 ### Kako je rad pregledan i proveren
 
@@ -37,16 +45,17 @@ Gotovo sav kod i testovi iz Mladenovih grana nastali su u radu sa AI alatom, com
 - **Testovi uz svaki deo.** Unit testovi za čiste delove, testovi konkurentnosti (npr. 8 niti × 250 upisa istog ključa, I2: čitalac usred force-a ne vidi vrednost), nasumični testovi poređeni sa nezavisnim modelom (`MergingIterator`), HTTP testovi nad pravim čvorom (CP1-API-001/002/003), testovi nad pravim SSTable fajlovima.
 - **Ponavljanje testova sa nitima.** Testovi koji zavise od niti i rokova pokretani su više puta zaredom; čekanje u testovima je ograničeno proverom stanja, ne `sleep`-om kao dokazom.
 - **Pravi proces.** Posle većih koraka `Main` je pokretan kao pravi proces i proveravan `curl`-om; tako su nađene i ispravljene dve greške: JDK `HttpServer` koji nije oslobađao port, i klijent koji je visio kad handler baci `Error`.
-- **Nezavisne provere tuđeg rada.** Heks primer WAL-a iz `FORMAT.md` nezavisno je preračunat (sopstveni CRC32C); Kimijev disk reader i status rute provereni su naspram ugovora pre povezivanja.
+- **Scenariji nad pravim procesom, u Docker-u.** Svaki scenario je pre PR-a pušten u `student-tests` kontejneru (`./dbctl test checkpoint-1 --case ...`) sa više seed-ova, a scenariji sa nitima i failpoint pauzama (API-004, API-005, FLS-007, CMP-005) i do osam puta zaredom; posle toga ceo skup, da se vidi da ništa drugo nije pokvareno.
+- **Nezavisne provere tuđeg rada.** Heks primer WAL-a iz `FORMAT.md` nezavisno je preračunat (sopstveni CRC32C); Kimijev disk reader i status rute provereni su naspram ugovora pre povezivanja. Harness i failpoint okvir pregledani su naspram PI §21.1 i §25.3; nađene greške (runner koji je pregazio neuspeh scenarija, placeholder scenario koji je uvek prolazio, nepovezane failpoint rute, `main` koji se nije kompajlirao posle dva istovremena merge-a) prijavljene su i ispravljene u posebnim granama, a izmene tuđih ugovora išle su preko protokola iz plana §5.3. Grane drugih članova proveravane su i na Windows-u, gde su nađeni testovi koji padaju samo tamo.
+- **Predlozi provereni naspram specifikacije pre koda.** AI predlog nije prihvatan samo zato što zvuči razumno: na primer, status bez mehanizma tokom oporavka je odbačen jer bi promenio tip obaveznih polja (CP1 §24), a oracle za FLS-002 je ispravljen jer je spec dozvoljavala flush posle oporavka.
 - **Odluke zapisane.** Svaki izbor koji spec ne fiksira upisan je u `docs/ODLUKE.md`.
 
 ### Poznate slabosti i otvorena pitanja
 
-- **Bez trajnosti dok ne stigne pravi WAL.** Čvor radi sa `InMemoryWal`; podaci se gube pri restartu dok Matejev `WalSegment` ne stane iza `MutationLog`/`WalFactory`.
-- **Privremeni delovi statusa.** `NodeStatus` izvodi WAL segmente (bez veličine), manifest (generacija 0) i održavanje (`IDLE`) iz stanja mehanizma, dok pravi moduli ne isporuče svoje podatke.
-- **Failpoint-i još nisu povezani.** Pet mesta u `Engine` je samo obeleženo komentarom; čeka se failpoint okvir.
-- **Scenario testovi zavise od harness-a.** CP1-API-004 i API-005 traže failpoint `PAUSE`, pa još nisu napisani kao scenariji.
-- **Za potvrdu kod asistenta:** značenje `minSequence` MemTable generacije (opseg primenjenih mutacija) i odbijanje čitanja posle `FAILED` (`docs/ODLUKE.md`).
+- **Redovi MDL-002 matrice za pet failpoint-a mehanizma** još nisu napisani; čekaju okvir kampanje MDL-002 (plan §6.5). Očekivani ishodi su već zapisani u `docs/odbrana/dodatak-a-mehanizam.md`.
+- **Scenariji se izvršavaju samo na Linux-u (Docker, CI).** Pravi server ne može da uradi fsync direktorijuma na Windows-u; testovi čvora na Windows-u zato koriste `WindowsSafeStorageIO`, a scenariji se pokreću kroz `./dbctl test`.
+- **`Engine.openInMemory`, `InMemoryWal` i `InMemoryFlusher`** ostaju samo za unit testove mehanizma; čvor ih ne koristi.
+- **Za potvrdu kod asistenta:** značenje `minSequence` MemTable generacije (opseg primenjenih mutacija), odbijanje čitanja posle `FAILED` i to da `/admin/v1/storage/status` vraća `503` dok mehanizam ne postoji (tokom oporavka i posle neuspelog oporavka), a dijagnostika je u `/health/ready` (`docs/ODLUKE.md`).
 
 ---
 
