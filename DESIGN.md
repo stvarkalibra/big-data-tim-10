@@ -15,7 +15,7 @@ Urednik fajla je Ilija (plan §15); svaki odeljak piše vlasnik dela sistema.
 | oporavak i politika oštećenja | §7 | Matej | popunjeno |
 | status i brojači | §8 | Kimi | čeka |
 | failpoint-i i arhitektura testova | §9 | Andrija | čeka |
-| namerna odstupanja od preporuka | §10 | svi | popunjeno za Mladenov deo |
+| namerna odstupanja od preporuka | §10 | svi | popunjeno za Mladenov i Matejev deo |
 
 ---
 
@@ -410,4 +410,19 @@ Izbori koji se tiču mehanizma i API-ja (obrazloženja u `docs/ODLUKE.md`):
 | greška posle trajne objave flush-a (brisanje WAL-a) ostavlja mehanizam `READY` | `ODLUKE.md`, red o grešci posle objave flush-a |
 | compaction: oštećen ulaz vodi u `FAILED`, izlaz u dva prolaza, brojači čišćenja | `ODLUKE.md`, red o compaction-u |
 
-Samo za unit testove mehanizma: `Engine.openInMemory`, `InMemoryWal` i `InMemoryFlusher`/`MemoryTable`; čvor ih ne koristi. Privremeno u statusu: WAL segmenti u `NodeStatus` su izvedeni iz mehanizma, bez veličine; manifest i održavanje su pravi (`ManifestManager`, `MaintenanceProgress`).
+Izbori za WAL, direktorijum i oporavak (Matej; obrazloženja u `docs/ODLUKE.md`). Usvojene preporučene osnove: `LOCK` kroz `tryLock()` i `node.json` iz CP1 §14.1, protokol stvaranja segmenta iz §16.1, oporavak u 15 koraka iz §21.1.
+
+| Izbor | Gde je zapisan |
+|---|---|
+| privremeni segment je `tmp/wal-<id>.log.tmp` sa istim ID-jem; stvaranje segmenta nema failpoint | `ODLUKE.md`, redovi o privremenom segmentu (18.10.) i o pravljenju segmenta (22.10.) |
+| nepotpun završetak se odseca samo kao poslednji okvir **celog** WAL-a; konačni segment kraći od 24 B je `WAL_HEADER` | `ODLUKE.md`, redovi od 18.10.2026. |
+| redosled provera okvira i kategorije `WAL_HEADER`, `WAL_LENGTH_GUARD`, `WAL_FRAME`, `CHECKSUM`, `WAL_SEQUENCE_ORDER` | `ODLUKE.md`, red od 18.10.2026.; `FORMAT.md` §3.4 |
+| okvir se piše u dva upisa (prefiks, ostatak), podrazumevani `prefixBytes` je 8; `walBytesWritten` ne broji zaglavlje segmenta | `ODLUKE.md`, redovi od 22.10.2026. |
+| posle prve greške u `append` ili `force` segment odbija sav dalji rad, nezavisno od `FAILED` u mehanizmu | `ODLUKE.md`, red od 22.10.2026. |
+| `node.json` se čita strogo; svaki neispravan ili tuđ identitet je `NODE_IDENTITY_MISMATCH`; nedostajući direktorijum uz postojeći `node.json` je `DIRECTORY_LAYOUT` | `ODLUKE.md`, redovi od 18.10.2026.; `FORMAT.md` §4 |
+| „stabilni podaci“ pri klasifikaciji su manifest ili bilo koji unos u `wal/` ili `sst/`; `LOCK` se otvara mimo `StorageIO` i drži do kraja procesa, i u `FAILED` | `ODLUKE.md`, redovi od 22.10. i 23.10.2026. |
+| čišćenje briše sve iz `tmp/` i orphan `sst-<id>.sst`; fajl nepoznatog imena ostaje; tabele se validiraju i u koraku 4 i pri otvaranju čitača | `ODLUKE.md`, redovi o čišćenju i validaciji od 23.10.2026. |
+| `recovery.after-wal-tail-truncate` se pogađa pri svakom pokretanju, a `recovery.after-wal-replay.before-ready` posle koraka 13 | `ODLUKE.md`, red od 22.10.2026. |
+| `walSegments` dolazi iz WAL kataloga; segment na disku koji ne štiti nijednu generaciju je `COVERED_PENDING_DELETE` | `ODLUKE.md`, red od 28.10.2026.; §7.6 |
+
+Samo za unit testove mehanizma: `Engine.openInMemory`, `InMemoryWal` i `InMemoryFlusher`/`MemoryTable`; čvor ih ne koristi. U statusu su svi delovi pravi: WAL segmenti dolaze iz WAL kataloga (§7.6), manifest i održavanje iz `ManifestManager` i `MaintenanceProgress`.
