@@ -11,7 +11,9 @@ import rs.raf.dlsm.engine.FlushScheduler;
 import rs.raf.dlsm.engine.GetResult;
 import rs.raf.dlsm.engine.OpContext;
 import rs.raf.dlsm.engine.RecoveredState;
+import rs.raf.dlsm.wal.WalCatalog;
 import rs.raf.dlsm.wal.WalFileNames;
+import rs.raf.dlsm.wal.WalFormat;
 import rs.raf.dlsm.wal.WalIdAllocator;
 import rs.raf.dlsm.wal.WalReader;
 
@@ -150,6 +152,37 @@ class WalRecoveryRunTest {
         assertEquals(List.of(2L), result.retiredSegmentIds());
         assertEquals(1, result.lastUsedSequence());
         assertEquals(List.of(segmentName(1), segmentName(3)), h.walFiles());
+    }
+
+    // ===== Catalog for the storage status (CP1 §24) =====
+
+    // Kept segments with their own sequences, the new active one header-only.
+    @Test
+    void catalogListsKeptSegmentsAndTheNewActiveOne() throws Exception {
+        writeWal007();
+        h.writeSegment(3, segment(3));
+
+        WalRecoveryResult result = recover(2);
+
+        assertEquals(List.of(
+                new WalCatalog.Segment(5, Files.size(h.segmentFile(5)), 3L, 4L),
+                new WalCatalog.Segment(9, Files.size(h.segmentFile(9)), 5L, 6L),
+                new WalCatalog.Segment(10, WalFormat.SEGMENT_HEADER_BYTES, null, null)),
+                result.walFactory().catalog().snapshot());
+    }
+
+    // The repaired segment is listed with its length after the cut.
+    @Test
+    void catalogHasTheLengthAfterTheTornTailWasCut() throws Exception {
+        byte[] withTornTail = segment(1, put("base", 1, "x"), put("torn", 2, "y".repeat(10)));
+        int kept = WalFormat.SEGMENT_HEADER_BYTES + frameLength(put("base", 1, "x"));
+        h.writeSegment(1, Arrays.copyOf(withTornTail, kept + 12));
+
+        WalRecoveryResult result = recover(0);
+
+        assertEquals(kept, Files.size(h.segmentFile(1)));
+        assertEquals(new WalCatalog.Segment(1, kept, 1L, 1L),
+                result.walFactory().catalog().snapshot().getFirst());
     }
 
     // ===== Recovery after recovery (CP1-WAL-008, I6) =====

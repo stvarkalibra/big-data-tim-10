@@ -11,6 +11,7 @@ import rs.raf.dlsm.failpoint.Failpoints;
 import rs.raf.dlsm.io.StorageIO;
 import rs.raf.dlsm.log.JsonLog;
 import rs.raf.dlsm.stats.StorageStats;
+import rs.raf.dlsm.wal.WalCatalog;
 import rs.raf.dlsm.wal.WalFileNames;
 import rs.raf.dlsm.wal.WalIdAllocator;
 import rs.raf.dlsm.wal.WalLogScan;
@@ -104,6 +105,7 @@ public final class WalRecovery {
         List<Long> retired;
         try {
             retired = retireSegments(scan, flushedThroughSequence, ctx);               // 13
+            registerKept(scan, retired, segments.catalog());
             failpoints.hit(FailpointNames.RECOVERY_AFTER_WAL_REPLAY_BEFORE_READY, ctx);
         } catch (IOException | RuntimeException e) {
             active.close();
@@ -152,6 +154,24 @@ public final class WalRecovery {
         }
 
         return List.copyOf(retired);
+    }
+
+    /**
+     * After step 13, the old segments that stay join the catalog for the
+     * storage status (CP1 §24): their length after any torn tail was cut and
+     * the sequences of their valid frames. The new active segment is already
+     * there, registered when it was created.
+     */
+    private static void registerKept(WalLogScan scan, List<Long> retired, WalCatalog catalog) {
+        for (WalScanResult segment : scan.segments()) {
+            if (retired.contains(segment.segmentId())) {
+                continue;
+            }
+            List<WalScanResult.Entry> entries = segment.entries();
+            catalog.register(new WalCatalog.Segment(segment.segmentId(), segment.validLength(),
+                    entries.isEmpty() ? null : entries.getFirst().record().sequence(),
+                    entries.isEmpty() ? null : entries.getLast().record().sequence()));
+        }
     }
 
     /**
