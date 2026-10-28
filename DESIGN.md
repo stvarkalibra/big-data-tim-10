@@ -15,7 +15,7 @@ Urednik fajla je Ilija (plan §15); svaki odeljak piše vlasnik dela sistema.
 | oporavak i politika oštećenja | §7 | Matej | popunjeno |
 | status i brojači | §8 | Kimi | čeka |
 | failpoint-i i arhitektura testova | §9 | Andrija | čeka |
-| namerna odstupanja od preporuka | §10 | svi | popunjeno za Mladenov deo |
+| namerna odstupanja od preporuka | §10 | svi | popunjeno za Mladenov i Matejev deo |
 
 ---
 
@@ -296,7 +296,7 @@ Ulaz je `RecoveryProcedure.openEngine`; `recover` radi korake 1–14, a `Engine.
 | 5–6 | `removeTemporaryAndOrphanFiles` | briše se sve iz `tmp/` i svaki `sst-<id>.sst` koji manifest ne navodi; fajl nepoznatog imena ostaje (`RECOVERY_UNKNOWN_FILE`); force direktorijuma |
 | 7–9 | `WalRecovery`, `WalReader` | segmenti rastućim ID-jem; odseca se samo nepotpun završni okvir celog WAL-a, pa force; failpoint `recovery.after-wal-tail-truncate` |
 | 10–11 | `WalRecovery` | zapisi iznad `flushedThroughSequence` idu u oporavljenu generaciju 1; sledeći redni broj je `max(flushedThroughSequence, najveći ispravan WAL seq) + 1` |
-| 12–13 | `WalRecovery` | nov aktivni segment protokolom iz CP1 §16, tek onda brisanje praznih i pokrivenih segmenata; failpoint `recovery.after-wal-replay.before-ready` |
+| 12–13 | `WalRecovery` | nov aktivni segment protokolom iz CP1 §16, tek onda brisanje praznih i pokrivenih segmenata; zadržani segmenti ulaze u WAL katalog (§7.6); failpoint `recovery.after-wal-replay.before-ready` |
 | 14 | `openTables` | čitač (indeks i Bloom filter u memoriji) za svaku tabelu iz manifesta |
 | 15 | `Engine.open` (Mladen) | mehanizam je `READY`; oporavljena generacija odmah ide radniku na flush |
 
@@ -309,6 +309,8 @@ Pad u bilo kom koraku je bezbedan: svaki korak ili ne menja disk, ili ostavlja s
 - Odseca se samo okvir koji je poslednji u **celom** WAL-u i fizički nepotpun. Okvir iza koga postoji drugi okvir nije nastao padom, pa je oštećenje (`WAL_FRAME`).
 - Komplement dužine se proverava pre EOF-a. Oštećena dužina zato nikad ne izgleda kao nepotpun završetak (`WAL_LENGTH_GUARD`).
 - Kompletan okvir sa lošim CRC-om je oštećenje (`CHECKSUM`) i kada je fizički poslednji u fajlu, jer može da sadrži potvrđenu mutaciju (I7, CP1-WAL-003).
+- Redni brojevi strogo rastu kroz ceo WAL, i preko granica segmenata. Ponovljen ili opadajući redni broj je oštećenje (`WAL_SEQUENCE_ORDER`) i kada su svi okviri i CRC-ovi ispravni: zapisi se nikad ne sortiraju da bi se dobila neka „moguća“ istorija (CP1-WAL-007). Praznine u rednim brojevima i u ID-jevima segmenata su dozvoljene.
+- Zaglavlje segmenta (magic, verzija, ID jednak imenu fajla, CRC) mora biti ispravno (`WAL_HEADER`). To važi i za konačni segment kraći od 24 B, jer segment dobija konačno ime tek posle force-a kompletnog zaglavlja.
 - Oštećenje se nikad ne popravlja i ne preskače: fajl ostaje bajt po bajt isti, novi segment se ne pravi, a pokretanje staje. Redosled provera i kategorije su u `FORMAT.md` §3.4.
 
 ### 7.3 Čvor i neuspeh oporavka
@@ -323,7 +325,38 @@ Kada oporavak ne uspe (CP1 §21.4), proces **ostaje živ** u `FAILED`:
 - `LOCK` ostaje zauzet do kraja procesa, pa drugi proces ne može da menja isti direktorijum;
 - iz `FAILED` nema povratka u istom procesu; ponovo pokušava tek restart.
 
-Za vreme rada: oštećenje ili I/O greška na objavljenoj tabeli vodi u `FAILED`; posle toga se odbijaju i mutacije i čitanja (§10).
+Za vreme rada: oštećenje ili I/O greška na objavljenoj tabeli, kao i greška u dopisivanju ili force-u WAL-a (§7.4), vodi u `FAILED`; posle toga se odbijaju i mutacije i čitanja (§10), a status ostaje dostupan.
+
+### 7.4 Greška u putu upisa
+
+`WalSegment.append` piše okvir u dva poziva `StorageIO.writeFully`: strogi prefiks (podrazumevano 8 B zaštićene dužine, ili `prefixBytes` iz pravila failpoint-a), pa ostatak. `force` je tačka trajnosti (§2). Svaka greška u `append` ili `force`, prava ili ubrizgana, znači da je kraj segmenta neizvestan (CP1 §9.3):
+
+- segment od tada odbija svaki `append` i `force` (`hasUncertainTail`), pa iza neizvesnog kraja nikad ne nastaje nov okvir;
+- mehanizam prelazi u `FAILED` sa `lastFatalError.code = STORAGE_IO`; klijent dobija `500 STORAGE_IO`, a svaka kasnija mutacija i svako čitanje `503 NODE_NOT_READY`;
+- šta je na disku odlučuje tek oporavak posle restarta:
+
+| Mesto greške | Na disku | Posle oporavka |
+|---|---|---|
+| `wal.before-append` | ništa od kandidata | kandidat odsutan |
+| `wal.after-record-prefix` | strogi prefiks okvira | prefiks se odseca jednom (`walTornTailsTruncated`), kandidat odsutan |
+| `wal.after-append.before-sync` | kompletan okvir bez force-a | kandidat prisutan ako je okvir preživeo, inače odsutan; nikad delimičan |
+
+Brojači prate granice iz CP1 §24: `walAppendAttempts` pre prvog upisa, `walBytesWritten` posle svakog uspešnog upisa (i prefiksa), `walAppendsCompleted` tek posle celog okvira, `walForcesSucceeded` tek posle uspešnog force-a (CP1-WAL-004).
+
+### 7.5 Više segmenata
+
+- Segmenti se čitaju rastućim ID-jem iz imena fajla, nikad redosledom listanja ni po vremenu izmene; ID u zaglavlju mora biti jednak ID-ju iz imena.
+- Oporavljenu generaciju može da štiti više starih segmenata; svi ostaju dok flush ne objavi njihove zapise (CP1 §19.1, korak 2).
+- Nov aktivni segment dobija ID iznad svakog ID-ja nađenog u `wal/` ili `tmp/`, pa se ID nikad ne koristi dvaput. U CP1-WAL-007, posle segmenata 2, 5 i 9, aktivni je 10.
+- Replay ništa ne dopisuje u WAL: posle oporavka su `walAppendAttempts` i `walBytesWritten` nula, a stari segmenti su bajt po bajt isti.
+
+### 7.6 WAL segmenti u statusu
+
+Niz `walSegments` (CP1 §24) dolazi iz `wal.WalCatalog`, spiska segmenata koji su na disku:
+
+- puni ga `WalSegments.createSegment` (čim je segment premešten u `wal/`), `WalSegment.append` (veličina posle svakog upisa, redni broj tek za kompletan okvir) i oporavak (zadržani segmenti, sa dužinom posle odsecanja); prazni ga `WalSegments.retire`, kroz koji flush briše pokrivene segmente (`WalRetirer` u `FlushJob`);
+- katalog ne čita disk. `NodeStatus` ga čita pod istim engine read lock-om kao deo mehanizma, a mehanizam dopisuje pod write lock-om, pa se veličine i redni brojevi slažu sa MemTable-ovima iz istog odgovora;
+- uloga je `ACTIVE` za segment aktivne MemTable, `IMMUTABLE` za segmente zamrznute generacije i `COVERED_PENDING_DELETE` za svaki drugi segment na disku: brisanje posle objave flush-a čeka ili nije uspelo, ili je to prazan segment neuspele rotacije. Takve segmente sledeći oporavak briše kao pokrivene ili prazne.
 
 ---
 
@@ -377,4 +410,19 @@ Izbori koji se tiču mehanizma i API-ja (obrazloženja u `docs/ODLUKE.md`):
 | greška posle trajne objave flush-a (brisanje WAL-a) ostavlja mehanizam `READY` | `ODLUKE.md`, red o grešci posle objave flush-a |
 | compaction: oštećen ulaz vodi u `FAILED`, izlaz u dva prolaza, brojači čišćenja | `ODLUKE.md`, red o compaction-u |
 
-Samo za unit testove mehanizma: `Engine.openInMemory`, `InMemoryWal` i `InMemoryFlusher`/`MemoryTable`; čvor ih ne koristi. Privremeno u statusu: WAL segmenti u `NodeStatus` su izvedeni iz mehanizma, bez veličine; manifest i održavanje su pravi (`ManifestManager`, `MaintenanceProgress`).
+Izbori za WAL, direktorijum i oporavak (Matej; obrazloženja u `docs/ODLUKE.md`). Usvojene preporučene osnove: `LOCK` kroz `tryLock()` i `node.json` iz CP1 §14.1, protokol stvaranja segmenta iz §16.1, oporavak u 15 koraka iz §21.1.
+
+| Izbor | Gde je zapisan |
+|---|---|
+| privremeni segment je `tmp/wal-<id>.log.tmp` sa istim ID-jem; stvaranje segmenta nema failpoint | `ODLUKE.md`, redovi o privremenom segmentu (18.10.) i o pravljenju segmenta (22.10.) |
+| nepotpun završetak se odseca samo kao poslednji okvir **celog** WAL-a; konačni segment kraći od 24 B je `WAL_HEADER` | `ODLUKE.md`, redovi od 18.10.2026. |
+| redosled provera okvira i kategorije `WAL_HEADER`, `WAL_LENGTH_GUARD`, `WAL_FRAME`, `CHECKSUM`, `WAL_SEQUENCE_ORDER` | `ODLUKE.md`, red od 18.10.2026.; `FORMAT.md` §3.4 |
+| okvir se piše u dva upisa (prefiks, ostatak), podrazumevani `prefixBytes` je 8; `walBytesWritten` ne broji zaglavlje segmenta | `ODLUKE.md`, redovi od 22.10.2026. |
+| posle prve greške u `append` ili `force` segment odbija sav dalji rad, nezavisno od `FAILED` u mehanizmu | `ODLUKE.md`, red od 22.10.2026. |
+| `node.json` se čita strogo; svaki neispravan ili tuđ identitet je `NODE_IDENTITY_MISMATCH`; nedostajući direktorijum uz postojeći `node.json` je `DIRECTORY_LAYOUT` | `ODLUKE.md`, redovi od 18.10.2026.; `FORMAT.md` §4 |
+| „stabilni podaci“ pri klasifikaciji su manifest ili bilo koji unos u `wal/` ili `sst/`; `LOCK` se otvara mimo `StorageIO` i drži do kraja procesa, i u `FAILED` | `ODLUKE.md`, redovi od 22.10. i 23.10.2026. |
+| čišćenje briše sve iz `tmp/` i orphan `sst-<id>.sst`; fajl nepoznatog imena ostaje; tabele se validiraju i u koraku 4 i pri otvaranju čitača | `ODLUKE.md`, redovi o čišćenju i validaciji od 23.10.2026. |
+| `recovery.after-wal-tail-truncate` se pogađa pri svakom pokretanju, a `recovery.after-wal-replay.before-ready` posle koraka 13 | `ODLUKE.md`, red od 22.10.2026. |
+| `walSegments` dolazi iz WAL kataloga; segment na disku koji ne štiti nijednu generaciju je `COVERED_PENDING_DELETE` | `ODLUKE.md`, red od 28.10.2026.; §7.6 |
+
+Samo za unit testove mehanizma: `Engine.openInMemory`, `InMemoryWal` i `InMemoryFlusher`/`MemoryTable`; čvor ih ne koristi. U statusu su svi delovi pravi: WAL segmenti dolaze iz WAL kataloga (§7.6), manifest i održavanje iz `ManifestManager` i `MaintenanceProgress`.
