@@ -4,8 +4,10 @@ import org.junit.jupiter.api.Test;
 
 import java.util.HashSet;
 import java.util.List;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /** The 33 scenario IDs of CP1 §29; no scenario is run. */
 class ScenarioRegistryTest {
@@ -30,13 +32,19 @@ class ScenarioRegistryTest {
     void implementedScenariosAreRegistered() {
         assertTrue(ScenarioRegistry.isImplemented("CP1-API-003"));
         assertTrue(ScenarioRegistry.isImplemented("CP1-SST-006"));
-        assertFalse(ScenarioRegistry.isImplemented("CP1-WAL-001"));
+        assertTrue(ScenarioRegistry.isImplemented("CP1-WAL-001"));
     }
 
     @Test
     void unimplementedScenarioIsSkippedNeverPassed() {
-        Report report = ScenarioRunner.execute("CP1-WAL-001",
-                ScenarioRegistry.get("CP1-WAL-001"), 1);
+        // Any ID still without an implementation; a fixed ID breaks as soon as it is registered.
+        Optional<String> unimplemented = ScenarioRegistry.getScenarioIds().stream()
+                .filter(id -> !ScenarioRegistry.isImplemented(id))
+                .findFirst();
+        assumeTrue(unimplemented.isPresent(), "all 33 scenarios are implemented");
+        String id = unimplemented.get();
+
+        Report report = ScenarioRunner.execute(id, ScenarioRegistry.get(id), 1);
 
         assertEquals(Report.Status.SKIPPED, report.getStatus());
         assertEquals(ScenarioRegistry.NOT_IMPLEMENTED, report.getFailurePhase());
