@@ -212,14 +212,18 @@ final class WalScenarioNode implements AutoCloseable {
                         + lifecycle);
             }
             try {
-                HttpResponse<String> response = adminCall("GET", "/health/ready");
-                last[0] = MAPPER.readTree(response.body());
+                last[0] = MAPPER.readTree(readiness().body());
                 return lifecycle.equals(last[0].path("lifecycle").asText());
             } catch (Exception notYetListening) {
                 return false;
             }
         }, Duration.ofMillis(READY_TIMEOUT_MS), scenarioId + ": lifecycle " + lifecycle);
         return last[0];
+    }
+
+    /** {@code GET /health/ready} as it is: {@code 503} while the node is not ready. */
+    HttpResponse<String> readiness() throws Exception {
+        return adminCall("GET", "/health/ready");
     }
 
     private HttpResponse<String> adminCall(String method, String path) throws Exception {

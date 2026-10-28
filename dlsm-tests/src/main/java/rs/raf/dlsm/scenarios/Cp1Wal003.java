@@ -143,6 +143,10 @@ public final class Cp1Wal003 {
 
             node.start();
             JsonNode ready = node.awaitLifecycle("FAILED");
+            // CP1 §29.2: readiness stays 503; FAILED is final, so this read sees the same state.
+            HttpResponse<String> readiness = node.readiness();
+            node.check(readiness.statusCode() == 503, "readiness" + at,
+                    "HTTP " + readiness.statusCode() + ": " + readiness.body());
             JsonNode fatal = ready.path("lastFatalError");
             node.check("NODE_NOT_READY".equals(ready.path("code").asText())
                             && damage.category().equals(fatal.path("code").asText()),
