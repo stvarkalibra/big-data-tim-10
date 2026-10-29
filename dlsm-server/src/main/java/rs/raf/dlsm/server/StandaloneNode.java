@@ -79,6 +79,11 @@ public final class StandaloneNode implements AutoCloseable {
                            Function<Failpoints, StorageIO> storage) throws IOException {
         // Failpoints exist only in test mode; otherwise every hit is a no-op.
         failpointRegistry = config.testMode() ? new FailpointRegistry(true) : null;
+        if (failpointRegistry != null && config.bootstrapFailpoints() != null) {
+            for (FailpointRegistry.Rule rule : config.bootstrapFailpoints()) {
+                failpointRegistry.addRule(rule);
+            }
+        }
         Failpoints failpoints = failpointRegistry != null
                 ? failpointRegistry : new NoOpFailpoints();
         layout = new DataLayout(config.dataDir());

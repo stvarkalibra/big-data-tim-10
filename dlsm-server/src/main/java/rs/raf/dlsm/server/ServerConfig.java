@@ -1,11 +1,13 @@
 package rs.raf.dlsm.server;
 
 import rs.raf.dlsm.engine.EngineConfig;
+import rs.raf.dlsm.failpoint.FailpointRegistry;
+import rs.raf.dlsm.server.http.ApiException;
+import rs.raf.dlsm.server.http.FailpointRoutes;
 
 import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
-import java.util.Map;
-import java.util.Objects;
+import java.util.*;
 
 /**
  * Process configuration read from environment variables.
@@ -27,7 +29,8 @@ import java.util.Objects;
  * by side, each over its own volume. Port 0 asks the OS for a free port.
  */
 public record ServerConfig(String nodeId, int publicPort, int adminPort,
-                           long memtableMaxBytes, boolean testMode, Path dataDir) {
+                           long memtableMaxBytes, boolean testMode, Path dataDir,
+                           List<FailpointRegistry.Rule> bootstrapFailpoints) {
 
     public static final String NODE_ID = "NODE_ID";
     public static final String PUBLIC_PORT = "DLSM_PUBLIC_PORT";
@@ -35,6 +38,7 @@ public record ServerConfig(String nodeId, int publicPort, int adminPort,
     public static final String MEMTABLE_MAX_BYTES = "MEMTABLE_MAX_BYTES";
     public static final String TEST_MODE = "TEST_MODE";
     public static final String DATA_DIR = "DLSM_DATA_DIR";
+    public static final String BOOTSTRAP_FAILPOINTS_B64 = "DLSM_TEST_BOOTSTRAP_FAILPOINTS_B64";
 
     public static final String DEFAULT_NODE_ID = "standalone";
     public static final int DEFAULT_PUBLIC_PORT = 8080;
@@ -60,8 +64,12 @@ public record ServerConfig(String nodeId, int publicPort, int adminPort,
     }
 
     /** Outside test mode, over the default data directory. */
+    public ServerConfig(String nodeId, int publicPort, int adminPort, long memtableMaxBytes, boolean testMode, Path dataDir) {
+        this(nodeId, publicPort, adminPort, memtableMaxBytes, testMode, dataDir, List.of());
+    }
+
     public ServerConfig(String nodeId, int publicPort, int adminPort, long memtableMaxBytes) {
-        this(nodeId, publicPort, adminPort, memtableMaxBytes, false, DEFAULT_DATA_DIR);
+        this(nodeId, publicPort, adminPort, memtableMaxBytes, false, DEFAULT_DATA_DIR, List.of());
     }
 
     /** Defaults for everything except the ports, e.g. for tests on port 0. */
@@ -73,14 +81,65 @@ public record ServerConfig(String nodeId, int publicPort, int adminPort,
     /** @throws IllegalArgumentException naming the bad variable */
     public static ServerConfig fromEnv(Map<String, String> env) {
         Objects.requireNonNull(env, "env");
+        boolean testMode = flag(env, TEST_MODE);
+        List<FailpointRegistry.Rule> bootstrapRules = parseBootstrapFailpoints(env.get(BOOTSTRAP_FAILPOINTS_B64), testMode);
         return new ServerConfig(
                 env.getOrDefault(NODE_ID, DEFAULT_NODE_ID),
                 (int) number(env, PUBLIC_PORT, DEFAULT_PUBLIC_PORT, 5),
                 (int) number(env, ADMIN_PORT, DEFAULT_ADMIN_PORT, 5),
                 number(env, MEMTABLE_MAX_BYTES,
                         EngineConfig.DEFAULT_MEMTABLE_MAX_BYTES, 18),
-                flag(env, TEST_MODE),
-                path(env, DATA_DIR, DEFAULT_DATA_DIR));
+                testMode,
+                path(env, DATA_DIR, DEFAULT_DATA_DIR),
+                bootstrapRules);
+    }
+
+    private static List<FailpointRegistry.Rule> parseBootstrapFailpoints(String b64Text, boolean testMode) {
+        if (b64Text == null) {
+            return List.of();
+        }
+        if (!testMode) {
+            throw new IllegalArgumentException("DLSM_TEST_BOOTSTRAP_FAILPOINTS_B64 requires TEST_MODE=true");
+        }
+        byte[] decoded;
+        try {
+            decoded = java.util.Base64.getDecoder().decode(b64Text);
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException("Invalid DLSM_TEST_BOOTSTRAP_FAILPOINTS_B64 (invalid Base64)", e);
+        }
+        String jsonStr = new java.lang.String(decoded, java.nio.charset.StandardCharsets.UTF_8);
+        com.fasterxml.jackson.databind.JsonNode root;
+        try {
+            root = new com.fasterxml.jackson.databind.ObjectMapper().readTree(jsonStr);
+        } catch (Exception e) {
+            throw new IllegalArgumentException("Invalid DLSM_TEST_BOOTSTRAP_FAILPOINTS_B64 (invalid JSON)", e);
+        }
+        if (!root.isArray()) {
+            throw new IllegalArgumentException("DLSM_TEST_BOOTSTRAP_FAILPOINTS_B64 must be a JSON array");
+        }
+        List<FailpointRegistry.Rule> rules = new ArrayList<>();
+        Set<String> tokens = new HashSet<>();
+        for (com.fasterxml.jackson.databind.JsonNode node : root) {
+            if (!node.isObject()) {
+                throw new IllegalArgumentException("Failpoint rule must be a JSON object");
+            }
+            com.fasterxml.jackson.databind.node.ObjectNode obj = (com.fasterxml.jackson.databind.node.ObjectNode) node;
+            com.fasterxml.jackson.databind.JsonNode tokenNode = obj.get("token");
+            if (tokenNode == null || !tokenNode.isTextual() || tokenNode.textValue().isEmpty()) {
+                throw new IllegalArgumentException("Failpoint rule must have a non-empty string 'token'");
+            }
+            String token = tokenNode.textValue();
+            if (!tokens.add(token)) {
+                throw new IllegalArgumentException("Duplicate failpoint token: " + token);
+            }
+            try {
+                FailpointRegistry.Rule rule = FailpointRoutes.parseRule(token, obj);
+                rules.add(rule);
+            } catch (ApiException e) {
+                throw new IllegalArgumentException(e.getMessage(), e);
+            }
+        }
+        return List.copyOf(rules);
     }
 
     /** Same settings with test mode switched on or off. */
