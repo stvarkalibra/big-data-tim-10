@@ -13,11 +13,9 @@ public class CandidateSet {
             candidates.add(value);
         }
     }
-
     public Set<byte[]> getCandidates() {
         return Collections.unmodifiableSet(candidates);
     }
-
     public boolean containsMatch(byte[] actual) {
         if (actual == null) return false;
         for (byte[] candidate : candidates) {

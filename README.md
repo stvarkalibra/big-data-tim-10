@@ -23,6 +23,8 @@ Za kompilaciju celog projekta bez pokretanja testova, koristi Maven Wrapper:
 **Na Linux/macOS/Git Bash:**
 ```bash
 ./mvnw clean install -DskipTests
+& "C:\Program Files\Git\bin\bash.exe" ./dbctl build --no-cache
+& "C:\Program Files\Git\bin\bash.exe" ./dbctl test checkpoint-1 --case CP1-MDL-001 --seed 12345
 
 ## Pokretanje testova i komande (`dbctl`)
 

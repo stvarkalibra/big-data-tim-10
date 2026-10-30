@@ -87,8 +87,7 @@ public class NodeController implements AutoCloseable {
     }
 
     static Path serverJar(String configured) throws IOException {
-        Path jar = Path.of(configured == null || configured.isBlank()
-                ? DEFAULT_SERVER_JAR : configured);
+        Path jar = Path.of(configured == null || configured.isBlank() ? DEFAULT_SERVER_JAR : configured);
         if (!Files.isRegularFile(jar)) {
             throw new IOException("Server jar not found: " + jar.toAbsolutePath()
                     + " (build it with ./mvnw package or ./dbctl build, or set "
@@ -102,8 +101,7 @@ public class NodeController implements AutoCloseable {
         URI uri = URI.create("http://localhost:" + adminPort + "/health/ready");
         while (System.nanoTime() - deadline < 0) {
             if (process != null && !process.isAlive()) {
-                throw new IllegalStateException("Node exited with code "
-                        + process.exitValue() + " before it became ready");
+                throw new IllegalStateException("Node exited with code " + process.exitValue() + " before it became ready");
             }
             try {
                 HttpRequest request = HttpRequest.newBuilder().uri(uri).GET().build();
@@ -119,9 +117,13 @@ public class NodeController implements AutoCloseable {
     }
 
     public void restart() throws IOException {
+        try {
+            Thread.sleep(1000);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
         start(true);
     }
-
     public void crash() {
         if (process != null && process.isAlive()) {
             process.destroyForcibly();
@@ -132,20 +134,16 @@ public class NodeController implements AutoCloseable {
             }
         }
     }
-
     public boolean isAlive() {
         return process != null && process.isAlive();
     }
-
     @Override
     public void close() {
         crash();
     }
-
     public Path dataDir() {
         return dataDir;
     }
-
     public boolean awaitExit(long timeoutMs) {
         if (process == null) {
             return true;
@@ -157,7 +155,6 @@ public class NodeController implements AutoCloseable {
             return false;
         }
     }
-
     public boolean awaitLifecycle(String expectedLifecycle, long timeoutMs) {
         long deadline = System.currentTimeMillis() + timeoutMs;
         while (System.currentTimeMillis() < deadline) {
@@ -176,7 +173,6 @@ public class NodeController implements AutoCloseable {
         }
         return false;
     }
-
     private boolean checkLifecycleState(String expectedLifecycle) throws Exception {
         URI uri = URI.create("http://localhost:" + adminPort + "/health/ready");
         HttpRequest request = HttpRequest.newBuilder().uri(uri).GET().build();

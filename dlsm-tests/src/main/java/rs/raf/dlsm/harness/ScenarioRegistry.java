@@ -38,13 +38,7 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * The 33 stable scenario IDs of Checkpoint 1 (CP1 §29), in the order of the
- * specification, and the scenarios implemented so far (plan §5.2, §6.5).
- *
- * <p>{@code --list} and a full run always cover all 33 IDs. An ID without an
- * implementation is reported as {@code SKIPPED} with the phase
- * {@code NOT_IMPLEMENTED}, never as passed, so the suite fails until every
- * scenario exists (PI §25.3).
+ * The 33 stable scenario IDs of Checkpoint 1 (CP1 §29)
  */
 public final class ScenarioRegistry{
 
@@ -54,14 +48,10 @@ public final class ScenarioRegistry{
     /** CP1 §29.1–§29.6. */
     public static final List<String> CHECKPOINT_1_IDS = List.of(
             "CP1-API-001", "CP1-API-002", "CP1-API-003", "CP1-API-004", "CP1-API-005",
-            "CP1-WAL-001", "CP1-WAL-002", "CP1-WAL-003", "CP1-WAL-004",
-            "CP1-WAL-005", "CP1-WAL-006", "CP1-WAL-007", "CP1-WAL-008",
-            "CP1-FLS-001", "CP1-FLS-002", "CP1-FLS-003", "CP1-FLS-004",
-            "CP1-FLS-005", "CP1-FLS-006", "CP1-FLS-007",
-            "CP1-SST-001", "CP1-SST-002", "CP1-SST-003",
-            "CP1-SST-004", "CP1-SST-005", "CP1-SST-006",
-            "CP1-CMP-001", "CP1-CMP-002", "CP1-CMP-003", "CP1-CMP-004", "CP1-CMP-005",
-            "CP1-MDL-001", "CP1-MDL-002");
+            "CP1-WAL-001", "CP1-WAL-002", "CP1-WAL-003", "CP1-WAL-004", "CP1-WAL-005", "CP1-WAL-006", "CP1-WAL-007", "CP1-WAL-008",
+            "CP1-FLS-001", "CP1-FLS-002", "CP1-FLS-003", "CP1-FLS-004", "CP1-FLS-005", "CP1-FLS-006", "CP1-FLS-007",
+            "CP1-SST-001", "CP1-SST-002", "CP1-SST-003", "CP1-SST-004", "CP1-SST-005", "CP1-SST-006",
+            "CP1-CMP-001", "CP1-CMP-002", "CP1-CMP-003", "CP1-CMP-004", "CP1-CMP-005", "CP1-MDL-001", "CP1-MDL-002");
 
     public static final String NOT_IMPLEMENTED = "NOT_IMPLEMENTED";
 
@@ -115,15 +105,12 @@ public final class ScenarioRegistry{
             throw new IllegalStateException("Scenario registered twice: " + id);
         }
     }
-
     public static List<String> getScenarioIds() {
         return CHECKPOINT_1_IDS;
     }
-
     public static boolean isImplemented(String id) {
         return implemented.containsKey(id);
     }
-
     public static RunnableScenario get(String id) {
         RunnableScenario scenario = implemented.get(id);
         if (scenario != null || !CHECKPOINT_1_IDS.contains(id)) {
