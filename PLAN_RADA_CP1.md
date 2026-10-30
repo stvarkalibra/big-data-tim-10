@@ -444,7 +444,7 @@ Svaka sekcija ima isti oblik: cilj, šta pročitati, isporuke, failpoint-i, broj
 - [x] `SSTableFinalizer`: `force(tmp)` → `atomicMoveNoReplace(tmp, sst/sst-<id>.sst)` (postojeće odredište je greška) → `fsyncDirectory(sst/)`. Ovde žive sva tri `sstable.*` failpoint-a. Koriste ga i flush i compaction.
 - [x] `SSTableReader.open`: validacija footer-a i oblasti, indeks i Bloom u memoriji. `get(key)`: opseg → Bloom → binarna pretraga indeksa (poslednji prvi-ključ ≤ traženi) → jedno čitanje bloka (najviše dva) → CRC → pretraga unutar bloka. Oštećenje daje `StorageException`, **nikad** `NOT_FOUND` (CP1 §11.2).
 - [x] `SSTableIterator`: pozicioniranje kroz indeks blizu `startInclusive`, zatim redom kroz blokove. Nikad od nultog bloka (CP1 §12, §17.4).
-- [ ] `SSTableValidator.validateFully`: strimovanje kroz ceo fajl (zaglavlje, svaki blok i njegov CRC, redosled ključeva, indeks, Bloom, footer, granice oblasti, slaganje sa manifestom) bez držanja svih blokova u memoriji. Kategorije: `DATA_BLOCK`, `INDEX`, `BLOOM`, `FOOTER`, `TRUNCATED_REGION`, `MANIFEST_TABLE_MISMATCH` (CP1 §17.3, §29.4 SST-006).
+- [x] `SSTableValidator.validateFully`: strimovanje kroz ceo fajl (zaglavlje, svaki blok i njegov CRC, redosled ključeva, indeks, Bloom, footer, granice oblasti, slaganje sa manifestom) bez držanja svih blokova u memoriji. Kategorije: `DATA_BLOCK`, `INDEX`, `BLOOM`, `FOOTER`, `TRUNCATED_REGION`, `MANIFEST_TABLE_MISMATCH` (CP1 §17.3, §29.4 SST-006).
 - [x] `inspect sstable <file-or-table-id>`: zaglavlje, CRC status, blokovi i offset-i, stavke indeksa, zapisi sa `sequence` i vrstom, jasna razlika između tombstone-a i prazne vrednosti.
 - [x] Status endpoint-i: `GET /admin/v1/storage/status` (pun JSON iz CP1 §24, snimak pod engine read lock-om, nizovi sortirani po ID-ju), `GET /admin/v1/status` (`standaloneStorage`, `partitions:[{partitionId:0, role:"PRIMARY", epoch:0, ...}]`, `metadataRevision=0`, `metadataLeaderId=null`) i `POST /admin/v1/storage/stats/reset`.
 
@@ -452,7 +452,7 @@ Svaka sekcija ima isti oblik: cilj, šta pročitati, isporuke, failpoint-i, broj
 
 **Brojači:** `sstableDataBlocksRead`, `sstableDataBytesRead`, `bloomNegativeSkips`, `bloomPositiveProbes`, `rangeScanBlocksRead` (scan **ne** konsultuje Bloom), `resetEpoch`.
 
-**Testovi:** CP1-SST-001 do SST-006 i CP1-FLS-002 (pad pre force-a ili preimenovanja SSTable; Kimijevi hook-ovi). Za SST-006 podslučajeve (g) i (h) (manifest) radi zajedno sa Ilijom.
+**Testovi:** CP1-SST-001 do SST-006 i CP1-FLS-002 (pad pre force-a ili preimenovanja SSTable; Kimijevi hook-ovi). Za SST-006 podslučajeve (g) i (h) (manifest) radi zajedno sa Ilijom. ✅ Svi su napisani i prolaze u Docker-u (28.10.2026.); odgovori za odbranu su u `docs/odbrana/`.
 
 **Dokumentacija:** `FORMAT.md` §SSTable, `DESIGN.md` §put čitanja kroz SSTable i §status.
 
