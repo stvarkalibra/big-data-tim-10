@@ -88,7 +88,7 @@ public final class FailpointRoutes {
         return token;
     }
 
-    private static Rule parseRule(String token, ObjectNode body) throws ApiException {
+    public static Rule parseRule(String token, ObjectNode body) throws ApiException {
         String name = requiredText(body, "name");
         if (!FailpointCatalog.contains(name)) {
             throw ApiException.invalid("Unknown failpoint: " + name);

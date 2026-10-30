@@ -17,9 +17,7 @@ import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 
 public class NodeController implements AutoCloseable {
-    /** Env variable with the server jar; the student-tests image sets it (PI §25.2). */
     public static final String SERVER_JAR_ENV = "DLSM_SERVER_JAR";
-    /** The jar that {@code ./mvnw package} builds, relative to the repository root. */
     static final String DEFAULT_SERVER_JAR = "dlsm-server/target/dlsm-server-1.0-SNAPSHOT.jar";
 
     private Process process;
@@ -27,13 +25,16 @@ public class NodeController implements AutoCloseable {
     private final int port;
     private final int adminPort;
     private final HttpClient client = HttpClient.newHttpClient();
-    /** Extra server configuration for every start; the ports, directory and test mode stay ours. */
     private final Map<String, String> environment = new LinkedHashMap<>();
 
     public NodeController(Path dataDir, int port, int adminPort) {
         this.dataDir = dataDir;
         this.port = port;
         this.adminPort = adminPort;
+    }
+
+    public static NodeController startStandalone() throws IOException {
+        return startStandalone(18080, 18082);
     }
 
     public static NodeController startStandalone(int port, int adminPort) throws IOException {
@@ -43,12 +44,21 @@ public class NodeController implements AutoCloseable {
         return controller;
     }
 
-    /**
-     * Sets a server environment variable for every later start, e.g.
-     * {@code MEMTABLE_MAX_BYTES} for a scenario that needs tiny generations.
-     */
+    public int publicPort() {
+        return port;
+    }
+
+    public int adminPort() {
+        return adminPort;
+    }
+
     public NodeController withEnvironment(String name, String value) {
         environment.put(Objects.requireNonNull(name, "name"), Objects.requireNonNull(value, "value"));
+        return this;
+    }
+
+    public NodeController withoutEnvironment(String name) {
+        environment.remove(Objects.requireNonNull(name, "name"));
         return this;
     }
 
@@ -76,16 +86,8 @@ public class NodeController implements AutoCloseable {
         this.process = pb.start();
     }
 
-    /**
-     * The production server jar: {@code DLSM_SERVER_JAR} when set, otherwise
-     * the jar built in this repository.
-     *
-     * @throws IOException if the jar does not exist, so a missing build fails
-     *                     at once instead of as a readiness timeout
-     */
     static Path serverJar(String configured) throws IOException {
-        Path jar = Path.of(configured == null || configured.isBlank()
-                ? DEFAULT_SERVER_JAR : configured);
+        Path jar = Path.of(configured == null || configured.isBlank() ? DEFAULT_SERVER_JAR : configured);
         if (!Files.isRegularFile(jar)) {
             throw new IOException("Server jar not found: " + jar.toAbsolutePath()
                     + " (build it with ./mvnw package or ./dbctl build, or set "
@@ -94,16 +96,12 @@ public class NodeController implements AutoCloseable {
         return jar;
     }
 
-    // Nova metoda za čekanje da server bude spreman
     public void awaitReady(long timeoutMs) throws Exception {
-        // Monotonic clock: a wall-clock jump must not stretch or cut the deadline.
         long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
         URI uri = URI.create("http://localhost:" + adminPort + "/health/ready");
         while (System.nanoTime() - deadline < 0) {
             if (process != null && !process.isAlive()) {
-                // E.g. a taken port or a bad configuration: no point in waiting.
-                throw new IllegalStateException("Node exited with code "
-                        + process.exitValue() + " before it became ready");
+                throw new IllegalStateException("Node exited with code " + process.exitValue() + " before it became ready");
             }
             try {
                 HttpRequest request = HttpRequest.newBuilder().uri(uri).GET().build();
@@ -112,7 +110,6 @@ public class NodeController implements AutoCloseable {
                     return;
                 }
             } catch (Exception ignored) {
-                // Server se još uvek diže
             }
             Thread.sleep(200);
         }
@@ -120,6 +117,11 @@ public class NodeController implements AutoCloseable {
     }
 
     public void restart() throws IOException {
+        try {
+            Thread.sleep(1000);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
         start(true);
     }
     public void crash() {
@@ -161,7 +163,6 @@ public class NodeController implements AutoCloseable {
                     return true;
                 }
             } catch (Exception e) {
-                // Ignoriše greške dok čvor ne postane dostupan
             }
             try {
                 Thread.sleep(100);
@@ -177,11 +178,9 @@ public class NodeController implements AutoCloseable {
         HttpRequest request = HttpRequest.newBuilder().uri(uri).GET().build();
         HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
 
-        // Ukoliko telo odgovora ili status odražava željeni ciklus (ili status 200 za READY)
         if (expectedLifecycle.equalsIgnoreCase("READY") && response.statusCode() == 200) {
             return true;
         }
-        // Može se proveriti i direktno po sadržaju JSON-a ako status vraća lifecycle polje
         return response.body() != null && response.body().contains(expectedLifecycle);
     }
 }
