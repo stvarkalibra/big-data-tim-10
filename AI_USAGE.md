@@ -84,6 +84,7 @@ Gotovo sav kod i testovi iz Mladenovih grana nastali su u radu sa AI alatom, com
 | `matej/n2-cleanup` | provera HTTP 503 u CP1-WAL-003, dopuna ove dokumentacije i plana |
 | `matej/scenario-wal-004` | scenario CP1-WAL-004 (`IO_ERROR` na sva tri `wal.*` failpoint-a), `rawPut` i `rawDelete` u `WalScenarioNode` |
 | `matej/scenario-wal-007` | `fixtures/WalFixtureWriter` prepisan po `FORMAT.md` §3, `fixtures/VolumeFixture`, scenario CP1-WAL-007 (važeći skup segmenata 2, 5, 9 i nevažeći redosled) |
+| `matej/scenario-wal-008` | scenario CP1-WAL-008 (bootstrap `CRASH` na `recovery.*`, kontrola bez pada, dva redosleda padova), `NodeController.exitCode`, bootstrap start u `WalScenarioNode` |
 
 ### Kako je rad pregledan i proveren
 
@@ -97,9 +98,8 @@ Gotovo sav kod i testovi iz Mladenovih grana nastali su u radu sa AI alatom, com
 
 ### Poznate slabosti i otvorena pitanja
 
-- **WAL-008 još ne postoji.** Čeka bootstrap failpoint-e (`DLSM_TEST_BOOTSTRAP_FAILPOINTS_B64`, CP1 §26.3), koji još nisu implementirani.
 - **Grana „kandidat nedostaje“ u WAL-006 i WAL-004 (c) nije izvršena.** Pad procesa ne briše keš OS-a, pa je kompletan okvir bez force-a uvek ostao na disku.
-- **`RECOVERING` i ubrizgan `IO_ERROR` tokom oporavka nisu testirani na nivou čvora.** Za to treba failpoint naoružan pre pokretanja (`DLSM_TEST_BOOTSTRAP_FAILPOINTS_B64`).
+- **Ubrizgan `IO_ERROR` tokom oporavka nije testiran na nivou čvora.** WAL-008 pokriva `CRASH` na sva tri `recovery.*` failpoint-a; plan §8 za njih ne traži `IO_ERROR` mapiranje.
 - **Status čvora koji je pao u oporavku je 503.** Dijagnostika je samo u `/health/ready`. Isto tumačenje stoji i u Kimijevom delu: CP1 §24 opisuje status mehanizma koji postoji.
 - **Prazan segment neuspele rotacije.** Ostaje u statusu kao `COVERED_PENDING_DELETE` dok ga sledeći oporavak ne obriše (`docs/ODLUKE.md`, 28.10.2026.).
 - **Windows.** Pravi server na Windows-u ne prolazi force direktorijuma, pa WAL scenariji rade samo u Docker-u (`./dbctl test checkpoint-1`). CI (`linux-tests.yml`) pokreće samo `./mvnw verify`, ne i scenarije.
