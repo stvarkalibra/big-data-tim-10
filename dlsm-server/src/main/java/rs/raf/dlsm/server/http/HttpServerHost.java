@@ -40,6 +40,23 @@ public final class HttpServerHost implements AutoCloseable {
      */
     public static final int MAX_BODY_BYTES = 512 * 1024;
 
+    /**
+     * {@code TCP_NODELAY} on every accepted connection, a documented property
+     * of the JDK server (module {@code jdk.httpserver}, default
+     * {@code false}). A response leaves in more than one write, so with
+     * Nagle's algorithm its last part waits for the client's delayed ACK:
+     * about 40 ms per request (CP1-MDL-001 took 734 s instead of 47 s). The
+     * JDK reads it once, when its first server is created, so it is set
+     * before any server exists; an explicit {@code -D} setting wins.
+     */
+    static final String NO_DELAY_PROPERTY = "sun.net.httpserver.nodelay";
+
+    static {
+        if (System.getProperty(NO_DELAY_PROPERTY) == null) {
+            System.setProperty(NO_DELAY_PROPERTY, "true");
+        }
+    }
+
     private final HttpServer server;
     private final ExecutorService executor;
     private final Router router;
