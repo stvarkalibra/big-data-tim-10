@@ -42,35 +42,45 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.function.Function;
 
+/**
+ * One standalone process: the admin server on 8082, the storage engine and
+ * the public API on 8080, started in that order. The admin server comes
+ * first, so liveness answers while the engine is still opening or
+ * recovering (PI §20.1); readiness follows the engine's lifecycle.
+ *
+ * <p>The engine opens through startup recovery over {@code DLSM_DATA_DIR}
+ * (CP1 §21.1), with the flush worker as its maintenance. The node holds the
+ * directory lock until it closes. When recovery fails the process stays up
+ * as {@code FAILED} (CP1 §21.4); only a server that cannot bind fails
+ * {@link #start}.
+ */
 public final class StandaloneNode implements AutoCloseable {
 
     private final HttpServerHost adminHost;
     private final HttpServerHost publicHost;
-
-    /** Jedna instanca za ceo cvor, svi moduli zavise od nje(CP1 §24). */
+    /** One instance for the whole node: every module counts into it (CP1 §24). */
     private final StorageStats stats = new StorageStats();
-
-    /**samo kad je {@code TEST_MODE=true} (PI §16.6, §21). */
+    /** Present only with {@code TEST_MODE=true} (PI §16.6, §21). */
     private final FailpointRegistry failpointRegistry;
-
     private final DataLayout layout;
     private final StorageIO io;
     private final RecoveryProcedure recovery;
     private volatile StorageEngine engine;
     private volatile MaintenanceWorker maintenance;
-
-    /**(CP1 §24). */
+    /** Shared by the flush and compaction jobs; the status reports it (CP1 §24). */
     private final MaintenanceProgress progress = new MaintenanceProgress();
-
     private volatile NodeStatus status;
     private volatile boolean recovering;
+    /** Why startup recovery failed; the engine is then a {@link FailedStartupEngine}. */
     private volatile StorageException startupFailure;
     private volatile boolean stopping;
 
-    private StandaloneNode(ServerConfig config, JsonLog log, Function<Failpoints, StorageIO> storage) throws IOException {
-        // Failpoints samo u test modu.
+    private StandaloneNode(ServerConfig config, JsonLog log,
+                           Function<Failpoints, StorageIO> storage) throws IOException {
+        // Failpoints exist only in test mode; otherwise every hit is a no-op.
         failpointRegistry = config.testMode() ? new FailpointRegistry(true) : null;
-        if (failpointRegistry != null && config.bootstrapFailpoints() != null) {
+        if (failpointRegistry != null) {
+            // Armed before recovery, so the recovery hooks can fire (PI §21.2).
             for (FailpointRegistry.Rule rule : config.bootstrapFailpoints()) {
                 failpointRegistry.addRule(rule);
             }
