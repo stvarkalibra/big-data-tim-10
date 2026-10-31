@@ -17,6 +17,7 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.Clock;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
@@ -42,12 +43,14 @@ class StandaloneNodeFailpointsTest {
     }
 
     private void start(boolean testMode) throws Exception {
+        start(ServerConfig.onPorts(0, 0).withTestMode(testMode).withDataDir(dataDir));
+    }
+
+    private void start(ServerConfig config) throws Exception {
         JsonLog log = new JsonLog("standalone",
                 new PrintStream(new ByteArrayOutputStream(), true, StandardCharsets.UTF_8),
                 Clock.systemUTC());
-        node = StandaloneNode.start(
-                ServerConfig.onPorts(0, 0).withTestMode(testMode).withDataDir(dataDir), log,
-                WindowsSafeStorageIO::new);
+        node = StandaloneNode.start(config, log, WindowsSafeStorageIO::new);
     }
 
     private HttpResponse<String> put(String key) throws Exception {
@@ -176,5 +179,27 @@ class StandaloneNodeFailpointsTest {
         // Durable and applied before the hook: the engine keeps serving.
         assertEquals(200, ready().statusCode());
         assertEquals(200, put("epsilon").statusCode());
+    }
+
+    @Test
+    void bootstrapRuleFiresInRecoveryAndIsNotKept() throws Exception {
+        FailpointRegistry.Rule rule = new FailpointRegistry.Rule("boot-1",
+                FailpointNames.RECOVERY_AFTER_MANIFEST_LOAD,
+                FailpointRegistry.Action.RETURN_ERROR, 0, 1, 0, Map.of());
+        start(ServerConfig.onPorts(0, 0).withTestMode(true).withDataDir(dataDir)
+                .withBootstrapFailpoints(List.of(rule)));
+
+        // The hook fired before any HTTP client could have armed it.
+        HttpResponse<String> health = ready();
+        assertEquals(503, health.statusCode());
+        assertEquals("FAILED", MAPPER.readTree(health.body()).get("lifecycle").asText());
+        // The process stays alive, so the rule shows like an API rule (CP1 §26.3).
+        assertEquals("TRIGGERED", failpointState("boot-1"));
+
+        // Test configuration, not database state: without it the next start recovers.
+        node.close();
+        start(true);
+        assertEquals(200, ready().statusCode());
+        assertEquals("UNKNOWN", failpointState("boot-1"));
     }
 }
