@@ -12,6 +12,7 @@ import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -35,7 +36,8 @@ import java.util.stream.Stream;
  *   <li><b>Operations:</b> recover the control normally and record its logical
  *       state. On the other copy start the node four times with one bootstrap
  *       rule each, then once without rules; {@code PUT(after, R)};
- *       {@code SIGKILL}, restart; read every key again.</li>
+ *       {@code SIGKILL}, restart; read every key again. A third copy repeats
+ *       this with the crashes in another order, from the seed.</li>
  *   <li><b>Failpoints:</b> bootstrap {@code CRASH} (CP1 §26.3) on (1)
  *       {@code recovery.after-manifest-load}, (2)
  *       {@code recovery.after-wal-tail-truncate}, (3) and (4)
@@ -53,9 +55,11 @@ import java.util.stream.Stream;
  *       header and its ID is never reused. The final start cuts nothing,
  *       replays exactly the six records, appends nothing, takes the control's
  *       next sequence, and ends with one usable active segment and an empty
- *       {@code tmp/}.</li>
+ *       {@code tmp/}. The same holds in the other order, where the tail stays
+ *       torn only until the first crash past the repair.</li>
  *   <li><b>Proves:</b> I6: reading the manifest, repairing the tail and
- *       replaying can each be repeated without side effects piling up.
+ *       replaying can each be repeated, in any order, without side effects
+ *       piling up.
  *       <b>Does not prove:</b> that directories are identical byte for byte
  *       after each attempt, which is not required (the segment IDs differ
  *       from the control), or anything about a damaged frame (WAL-003).</li>
@@ -78,6 +82,9 @@ public final class Cp1Wal008 {
     private static final String AFTER_MANIFEST_LOAD = "recovery.after-manifest-load";
     private static final String AFTER_TAIL_TRUNCATE = "recovery.after-wal-tail-truncate";
     private static final String BEFORE_READY = "recovery.after-wal-replay.before-ready";
+    /** The crashes of CP1 §29.2, in the order given there. */
+    private static final List<String> SPEC_ORDER = List.of(
+            AFTER_MANIFEST_LOAD, AFTER_TAIL_TRUNCATE, BEFORE_READY, BEFORE_READY);
     private static final String TORN_KEY = "torn";
     private static final Pattern SEGMENT_NAME = Pattern.compile("wal-(\\d{20})\\.log");
 
@@ -99,9 +106,19 @@ public final class Cp1Wal008 {
         try (WalScenarioNode prepared = WalScenarioNode.create(ID, seed, PUBLIC_PORT, ADMIN_PORT)) {
             TornVolume volume = prepareTornVolume(prepared, seed, model, keys);
             Map<String, String> control = recoverControl(prepared, seed, volume, model, keys);
-            recoverInterrupted(prepared, seed, volume, model, keys, control);
+            // Each copy mutates its own model: the final recovery adds a key.
+            recoverInterrupted(prepared, seed, volume, copyOf(model), new TreeSet<>(keys), control);
+            recoverInSeedOrder(prepared, seed, volume, copyOf(model), new TreeSet<>(keys), control);
         }
         report.pass();
+    }
+
+    private static ReferenceModel copyOf(ReferenceModel model) {
+        ReferenceModel copy = new ReferenceModel();
+        for (String key : model.keySet()) {
+            copy.put(key, model.get(key));
+        }
+        return copy;
     }
 
     /** Six acknowledged mutations and a strict prefix of a seventh, cut from the seed. */
@@ -188,6 +205,46 @@ public final class Cp1Wal008 {
                     "after the second " + BEFORE_READY);
 
             expectFinalRecovery(node, seed, volume, model, keys, control, secondNew);
+        }
+    }
+
+    /**
+     * The same crashes in another order, from the seed: the outcome must not
+     * depend on one order of crashes (CP1 §29.2). Only the first crash past
+     * the manifest hook repairs the tail, and only the replay hook adds a
+     * segment.
+     */
+    private static void recoverInSeedOrder(WalScenarioNode prepared, long seed, TornVolume volume,
+                                           ReferenceModel model, Set<String> keys,
+                                           Map<String, String> control) throws Exception {
+        List<String> order = new ArrayList<>(SPEC_ORDER);
+        Collections.shuffle(order, new Random(seed));
+        if (order.equals(SPEC_ORDER)) {
+            Collections.reverse(order);
+        }
+
+        try (WalScenarioNode node = WalScenarioNode.create(ID, seed, PUBLIC_PORT, ADMIN_PORT)) {
+            VolumeTools.cloneVolume(prepared.dataDir(), node.dataDir());
+
+            boolean repaired = false;
+            long greatest = volume.segmentId();
+            for (int i = 0; i < order.size(); i++) {
+                String failpoint = order.get(i);
+                String when = "after crash " + (i + 1) + " of " + order;
+                crashAt(node, failpoint);
+
+                repaired |= !failpoint.equals(AFTER_MANIFEST_LOAD);
+                if (failpoint.equals(BEFORE_READY)) {
+                    greatest = expectRepairedWithNewSegment(node, volume, greatest, when);
+                } else if (repaired) {
+                    expectRepaired(node, volume, when);
+                    expectOnlyHeaders(node, volume, when);
+                } else {
+                    expectStillTorn(node, volume, when);
+                }
+            }
+
+            expectFinalRecovery(node, seed, volume, model, keys, control, greatest);
         }
     }
 
@@ -293,9 +350,8 @@ public final class Cp1Wal008 {
     }
 
     /**
-     * Repaired as before, plus a new segment above {@code previous}: replay
-     * writes no copies, so every segment but the repaired one holds only its
-     * header, and a crash never hands out an ID twice.
+     * Repaired as before, plus a new segment above {@code previous}: a crash
+     * never hands out an ID twice.
      *
      * @return the greatest segment ID on disk
      */
@@ -303,15 +359,22 @@ public final class Cp1Wal008 {
                                                      long previous, String when) throws Exception {
         expectRepaired(node, volume, when);
 
-        List<Long> others = otherSegments(node, volume);
+        List<Long> others = expectOnlyHeaders(node, volume, when);
         node.check(!others.isEmpty() && others.getLast() > previous, when,
                 "expected a new segment above " + previous + ", found " + others);
+        return others.getLast();
+    }
+
+    /** Replay writes no copies: every segment but the repaired one holds only its header. */
+    private static List<Long> expectOnlyHeaders(WalScenarioNode node, TornVolume volume, String when)
+            throws Exception {
+        List<Long> others = otherSegments(node, volume);
         for (long other : others) {
             long length = Files.size(node.walSegment(other));
             node.check(length == SEGMENT_HEADER_BYTES, when,
                     "segment " + other + " holds " + length + " bytes, expected only its header");
         }
-        return others.getLast();
+        return others;
     }
 
     /** Segments on disk other than the repaired one, ascending. */
