@@ -55,6 +55,25 @@ class JsonTest {
     }
 
     @Test
+    void readsArrays() throws ApiException {
+        assertEquals(2, Json.readArray(utf8("[{\"token\":\"a\"}, 1]")).size());
+        assertTrue(Json.readArray(utf8("[]")).isEmpty());
+    }
+
+    @Test
+    void rejectsEmptyMalformedAndNonArrayValues() {
+        for (String text : new String[] {
+                "", "   ", "[", "not json", "{}", "\"x\"", "1", "null",
+                "[] []", "[{\"a\":1,\"a\":2}]"}) {
+            ApiException e = assertThrows(ApiException.class,
+                    () -> Json.readArray(utf8(text)), text);
+            assertEquals(ErrorCode.INVALID_REQUEST, e.code());
+        }
+
+        assertThrows(ApiException.class, () -> Json.readArray(null));
+    }
+
+    @Test
     void parserDetailIsNotEchoedToClient() {
         ApiException e = assertThrows(ApiException.class,
                 () -> Json.readObject(utf8("{\"value\": @@@ }")));

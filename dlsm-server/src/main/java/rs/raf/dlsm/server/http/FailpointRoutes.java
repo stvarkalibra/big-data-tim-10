@@ -80,14 +80,28 @@ public final class FailpointRoutes {
 
     private static String token(ApiRequest request) throws ApiException {
         String token = request.pathParam("token");
-        // Same alphabet and length as request ids (PI §17.2); "catalog" is
-        // reserved, since GET /admin/v1/failpoints/catalog is the catalog.
-        if (!RequestContext.isValidRequestId(token) || CATALOG.equals(token)) {
+        if (!isValidToken(token)) {
             throw ApiException.invalid("Invalid failpoint token");
         }
         return token;
     }
 
+    /**
+     * Same alphabet and length as request ids (PI §17.2); "catalog" is
+     * reserved, since GET /admin/v1/failpoints/catalog is the catalog. A
+     * bootstrap rule needs a valid token too, so its state can be read here.
+     */
+    public static boolean isValidToken(String token) {
+        return RequestContext.isValidRequestId(token) && !CATALOG.equals(token);
+    }
+
+    /**
+     * One rule of the failpoint API (PI §21.1); the bootstrap rules of
+     * {@code DLSM_TEST_BOOTSTRAP_FAILPOINTS_B64} use the same format (PI §21.2).
+     *
+     * @throws ApiException {@code INVALID_REQUEST} for an unknown failpoint or
+     *                      action, or a bad field
+     */
     public static Rule parseRule(String token, ObjectNode body) throws ApiException {
         String name = requiredText(body, "name");
         if (!FailpointCatalog.contains(name)) {

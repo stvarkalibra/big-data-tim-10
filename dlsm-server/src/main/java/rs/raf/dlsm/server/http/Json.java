@@ -5,6 +5,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.io.IOException;
@@ -56,5 +57,31 @@ public final class Json {
         }
 
         return (ObjectNode) node;
+    }
+
+    /**
+     * Parses UTF-8 text that must be one JSON array, with the same strictness
+     * as request bodies, e.g. the bootstrap failpoint rules (PI §21.2).
+     *
+     * @throws ApiException {@code INVALID_REQUEST} for empty, malformed or
+     *                      non-array input; the parser detail is not echoed
+     */
+    public static ArrayNode readArray(byte[] text) throws ApiException {
+        if (text == null || text.length == 0) {
+            throw ApiException.invalid("Value must be a JSON array");
+        }
+
+        JsonNode node;
+        try {
+            node = MAPPER.readTree(text);
+        } catch (IOException e) {
+            throw ApiException.invalid("Value is not valid JSON");
+        }
+
+        if (node == null || !node.isArray()) {
+            throw ApiException.invalid("Value must be a JSON array");
+        }
+
+        return (ArrayNode) node;
     }
 }
