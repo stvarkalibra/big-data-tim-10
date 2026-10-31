@@ -38,4 +38,9 @@ class NodeControllerTest {
         IOException e = assertThrows(IOException.class, () -> NodeController.serverJar(null));
         assertTrue(e.getMessage().contains("dlsm-server-1.0-SNAPSHOT.jar"));
     }
+
+    @Test
+    void noExitCodeBeforeAStart() {
+        assertTrue(new NodeController(dir, 1, 2).exitCode().isEmpty());
+    }
 }

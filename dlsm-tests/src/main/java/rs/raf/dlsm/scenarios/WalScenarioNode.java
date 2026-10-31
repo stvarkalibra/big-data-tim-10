@@ -44,6 +44,9 @@ final class WalScenarioNode implements AutoCloseable {
     /** Standalone ready within 20 s (plan §18.1). */
     private static final long READY_TIMEOUT_MS = 20_000;
     private static final Duration EXIT_TIMEOUT = Duration.ofSeconds(20);
+    private static final String BOOTSTRAP_FAILPOINTS_ENV = "DLSM_TEST_BOOTSTRAP_FAILPOINTS_B64";
+    /** A {@code CRASH} failpoint halts the process with this code. */
+    private static final int CRASH_EXIT_CODE = 137;
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
@@ -97,6 +100,45 @@ final class WalScenarioNode implements AutoCloseable {
     /** Starts a new process in test mode without waiting for any lifecycle. */
     void start() throws IOException {
         controller.start(true);
+    }
+
+    /**
+     * Starts a new process with bootstrap failpoint rules (CP1 §26.3): a JSON
+     * array armed before recovery. The rules are test configuration for this
+     * start only, so the next start runs without them.
+     */
+    void startWithBootstrapRules(String rulesJson) throws IOException {
+        controller.withEnvironment(BOOTSTRAP_FAILPOINTS_ENV, Base64.getEncoder()
+                .encodeToString(rulesJson.getBytes(StandardCharsets.UTF_8)));
+        try {
+            controller.start(true);
+        } finally {
+            controller.withoutEnvironment(BOOTSTRAP_FAILPOINTS_ENV);
+        }
+    }
+
+    /**
+     * Waits for a process that a {@code CRASH} failpoint must stop during
+     * recovery. It may never report ready on the way, and its exit code tells
+     * the failpoint's halt from a configuration error ({@code 2}) or a server
+     * that could not start ({@code 1}).
+     */
+    void awaitCrashBeforeReady(String what) {
+        Await.until(() -> {
+            if (!controller.isAlive()) {
+                return true;
+            }
+            int status;
+            try {
+                status = readiness().statusCode();
+            } catch (Exception notListeningOrAlreadyGone) {
+                return false;
+            }
+            check(status != 200, what, "the node became ready");
+            return false;
+        }, EXIT_TIMEOUT, scenarioId + ": " + what + ": process to exit");
+        check(controller.exitCode().orElse(-1) == CRASH_EXIT_CODE, what,
+                "exit code " + controller.exitCode() + ", expected " + CRASH_EXIT_CODE);
     }
 
     /** {@code SIGKILL}: no flush, no orderly shutdown (CP1-WAL-001). */

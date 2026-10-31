@@ -14,6 +14,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.OptionalInt;
 import java.util.concurrent.TimeUnit;
 
 public class NodeController implements AutoCloseable {
@@ -137,6 +138,13 @@ public class NodeController implements AutoCloseable {
     public boolean isAlive() {
         return process != null && process.isAlive();
     }
+
+    /** Exit code of the last process; empty before a start and while it runs. */
+    public OptionalInt exitCode() {
+        return process == null || process.isAlive()
+                ? OptionalInt.empty() : OptionalInt.of(process.exitValue());
+    }
+
     @Override
     public void close() {
         crash();
