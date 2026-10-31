@@ -258,4 +258,12 @@ class HttpServerHostTest {
         assertEquals(400, tooBig.statusCode());
         assertEquals("VALUE_TOO_LARGE", json(tooBig).get("code").asText());
     }
+
+    @Test
+    void acceptedConnectionsUseTcpNoDelay() {
+        // Set by the class itself before its first server, since the JDK
+        // reads the property only once; the latency it removes is measured
+        // by the Docker suite, not here.
+        assertEquals("true", System.getProperty(HttpServerHost.NO_DELAY_PROPERTY));
+    }
 }

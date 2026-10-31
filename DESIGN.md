@@ -411,6 +411,7 @@ Izbori koji se tiču mehanizma i API-ja (obrazloženja u `docs/ODLUKE.md`):
 | `minSequence`/`maxSequence` generacije su opseg **primenjenih** mutacija | `ODLUKE.md`, red o MemTable opsegu |
 | `retryable` u omotaču greške: `true` samo za `NODE_NOT_READY` i `DEADLINE_EXCEEDED` | `ODLUKE.md`, red o `retryable` |
 | HTTP: JDK `HttpServer`, `X-Request-Id` obavezan na 8080, telo ≤ 512 KiB, 404/405 za rute | `ODLUKE.md`, HTTP redovi |
+| HTTP: `TCP_NODELAY` na svakoj prihvaćenoj vezi (`sun.net.httpserver.nodelay=true`, postavlja `HttpServerHost`) | `ODLUKE.md`, red o `TCP_NODELAY` od 31.10.2026. |
 | ugovor engine ↔ održavanje i ulaz za oporavak (razlike od skice u planu §5.1) | `ODLUKE.md`, redovi o `MaintenanceHost` i `Engine.open` |
 | oporavljena generacija se flush-uje **posle** `READY` | `ODLUKE.md`, red o `Engine.open` |
 | posle neuspelog oporavka čvor ostaje živ u `FAILED`; dijagnostika je u `/health/ready` (`lastFatalError`), javni port vraća 503 | `ODLUKE.md`, red o neuspelom oporavku od 23.10.2026. |
