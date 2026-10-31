@@ -27,6 +27,36 @@ Važe za svaki binarni format u ovom fajlu (CP1 §15). Zajednički kod za njih j
 | Vrednost | `0..262144` bajta čiji se sadržaj ne tumači; prazna vrednost (`0` bajtova) nije isto što i tombstone. |
 | Zabranjeno | Java serijalizacija objekata, `BitSet` kao format na disku i bilo koji format zavisan od rasporeda klase u memoriji (CP1 §15). |
 
+### Verzije formata
+
+Svaki trajni format nosi verziju, a jedina podržana vrednost je `1`. Čitalac odbija svaku drugu: nema migracije, nema čitanja „koliko se može“ i fajl se ne menja. Pri pokretanju to je oštećenje sa kategorijom iz tabele, pa čvor ostaje u `FAILED` (CP1 §21.4), a inspektor tog fajla, gde postoji, vraća izlazni kod `1`. Izmena formata znači novu verziju i izmenu ugovora (plan §5.3).
+
+| Format | Gde je verzija | Kategorija |
+|---|---|---|
+| WAL segment | zaglavlje segmenta, bajtovi `8..9` (§3.2) | `WAL_HEADER` |
+| WAL zapis | okvir, bajtovi `8..9` (§3.3) | `WAL_FRAME` |
+| `node.json` | polje `formatVersion` (§4.1) | `NODE_IDENTITY_MISMATCH` |
+| `MANIFEST.json` | polje `formatVersion` (§5.1) | `MANIFEST_INVALID` |
+| SSTable zaglavlje | bajtovi `4..7` (§9) | `HEADER` |
+| SSTable footer | bajtovi `4..7` footera (§9) | `FOOTER` |
+| blok podataka | bajtovi `4..7` bloka (§7) | `DATA_BLOCK` |
+| retki indeks | bajtovi `4..7` indeksa (§8) | `INDEX` |
+| Bloom filter | verzija heša, bajtovi `4..7` filtera (§6) | `BLOOM` |
+
+### Granice dužina
+
+Dužina pročitana iz fajla proverava se pre alokacije, a veća vrednost je oštećenje.
+
+| Polje | Granica |
+|---|---|
+| ključ | `1..128` bajtova |
+| vrednost | `0..262144` bajta |
+| WAL okvir | `31..262302` bajta (§3.3) |
+| blok podataka | najviše `263168` bajtova (`262144 + 1024`), sa zaglavljem i CRC-om |
+| retki indeks | najviše `256 MiB` i `10 000 000` stavki |
+| Bloom filter | najviše `256 MiB` |
+| `nodeId` | `1..64` znaka (§4.1) |
+
 ## 2. Raspored direktorijuma i imena fajlova
 
 Raspored trajnog volumena (CP1 §14):
