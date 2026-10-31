@@ -7,8 +7,8 @@ Ovaj fajl opisuje tačne bajtove svih fajlova koje mehanizam upisuje na disk (CP
 | Zajednička pravila, raspored direktorijuma | §1, §2 | Matej (urednik fajla) |
 | WAL segment i okvir zapisa | §3 | Matej |
 | `node.json` | §4 | Matej |
-| SSTable (Bloom filter, blok podataka, retki indeks) | §6–§9 | Kimi |
 | `MANIFEST.json` i dodela ID-ja tabela | §5 | Ilija |
+| SSTable (Bloom filter, blok podataka, retki indeks, ceo fajl) | §6–§9 | Kimi |
 
 Izmena bilo kog formata je izmena zajedničkog ugovora: najava u grupi, obavezan PR, saglasnost vlasnika i red u `docs/ODLUKE.md` (plan §5.3).
 
@@ -273,14 +273,15 @@ dužina=35    komplement   ver=1  PUT rez redni broj = 3           k=5    v=0   
 | Polje | Značenje |
 |---|---|
 | `walDirectory` | uvek `lsm/wal`, relativno u odnosu na trajni direktorijum |
-| `status` | `VALID`, `TORN_TAIL` ili `CORRUPT` za ceo WAL; `MISSING` ili `IO_ERROR` kada pregled ne može da se izvrši |
+| `format` | uvek `LSMWAL01` |
+| `status` | `VALID`, `TORN_TAIL` ili `CORRUPT` za ceo WAL; `MISSING` ili `IO_ERROR` kada pregled ne može da se izvrši, i tada izlaz ima samo `walDirectory`, `status` i `message` |
 | `segmentCount`, `recordCount`, `lastSequence` | broj segmenata, broj ispravnih zapisa i najveći ispravan redni broj (`null` bez zapisa) |
 | `tornSegmentId`, `corruptSegmentId` | segment sa nepotpunim završetkom ili sa oštećenjem, inače `null` |
 | `otherFiles` | fajlovi u `wal/` koji nisu `wal-<id>.log`, sortirani po imenu |
 | `temporarySegments` | zaostali `wal-<id>.log.tmp` u `lsm/tmp/`, sortirani po imenu |
 | `segments` | jedan objekat po segmentu, po rastućem numeričkom ID-ju |
 
-Svaki segment sadrži: `file`, `segmentId`, sirova polja zaglavlja (`headerMagic` u heksu, `format`, `formatVersion`, `headerSegmentId`), `headerCrcStatus` (`VALID`, `INVALID` ili `TRUNCATED`), `sizeBytes`, `status`, `validLength`, `tornTail` (`frameOffset`, `eof`, `strayBytes`) ili `null`, `corruption` (`offset`, `category`, `message`) ili `null`, `recordCount`, `minSequence`, `maxSequence` i `records`. Segmenti iza prvog oštećenog dobijaju `status: NOT_SCANNED` i ne dekodiraju se.
+Svaki segment sadrži: `file`, `segmentId`, sirova polja zaglavlja (`headerMagic` u heksu, `format`, `formatVersion`, `headerSegmentId`), `headerCrcStatus` (`VALID`, `INVALID` ili `TRUNCATED`), `sizeBytes`, `status`, `validLength`, `tornTail` (`frameOffset`, `eof`, `strayBytes`) ili `null`, `corruption` (`offset`, `category`, `message`) ili `null`, `recordCount`, `minSequence`, `maxSequence` i `records`. Segmenti iza prvog oštećenog se ne dekodiraju i imaju samo `file`, `segmentId`, `status: NOT_SCANNED` i `reason`.
 
 Svaki zapis u `records` sadrži `offset` i `length` okvira u fajlu, `sequence`, `kind` (`PUT` ili `DELETE`), `key`, `tombstone`, `valueLength` i `crcStatus` (uvek `VALID`, jer se navode samo ispravni okviri). **Tombstone ima `tombstone: true` i `valueLength: null`; prazna vrednost ima `tombstone: false` i `valueLength: 0`.**
 
