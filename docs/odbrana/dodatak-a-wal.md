@@ -47,3 +47,49 @@ Kod: `WalSegment.append`, `WalSegment.force`, `Engine.mutate`, `WalRecovery.run`
 | Koji fajlovi su privremeni ili orphan? | Nijedan novi. |
 | Šta sme biti dvosmisleno? | Da li je pogođena mutacija prisutna: dozvoljena su tačno dva kompletna modela, bez nje i sa njom. Delimična vrednost nije dozvoljena, a raniji uspesi ostaju. |
 | Koja invarijanta uspostavlja bezbednost? | I1 (uspeha nije bilo, pa ništa obećano nije izgubljeno), I2, I3 (`nextSequence` je iznad svakog zadržanog okvira), I6. |
+
+## Failpoint-i oporavka
+
+Zajedničko za tri `recovery.*` failpoint-a:
+
+- Javni port se otvara tek posle oporavka, pa tokom njega nema novih mutacija. Potvrđene su samo operacije od pre prekida zbog koga se oporavak pokreće.
+- Do koraka 15 nema `READY` (I9), a sav rekonstruisan sadržaj je samo u memoriji i nestaje sa procesom.
+- Failpoint se pogađa i kada oporavak nema šta da popravi, a aktivira se bootstrap pravilom, jer HTTP API tada ne može da ga naoruža (CP1 §26.3). Sledeći start radi bez pravila i ponavlja oporavak od početka.
+
+Kod: `RecoveryProcedure.recover`, `RecoveryProcedure.openDirectoryAndLoadManifest`, `WalRecovery.run`.
+
+### 4. `recovery.after-manifest-load`
+
+| Pitanje | Odgovor |
+|---|---|
+| Koje klijentske operacije su potvrđene? | Samo one od pre prekida; ovaj start nije prihvatio nijednu. |
+| Koji bajtovi su možda stigli do trajnog skladišta? | Ovaj start nije dirao WAL ni SSTable. Na novoj bazi prva inicijalizacija je već napravila direktorijume, `node.json` i prazan manifest. |
+| Koji manifest je merodavan? | Upravo učitani i strukturno provereni `MANIFEST.json`; tabele još nisu validirane. |
+| Koji WAL zapisi se ponovo primenjuju? | Još nijedan u ovom startu. Sledeći oporavak primenjuje svaki ispravan okvir sa `sequence > flushedThroughSequence`. |
+| Koji fajlovi su privremeni ili orphan? | Isti kao pre starta: sve u `tmp/` i svaki `sst-<id>.sst` koji manifest ne navodi. Čišćenje još nije počelo. Eventualni nepotpun završetak je i dalje na disku. |
+| Šta sme biti dvosmisleno? | Ništa novo; ostaje samo ono što je ostavio prethodni prekid. |
+| Koja invarijanta uspostavlja bezbednost? | I4 (merodavan je samo manifest), I6, I9. |
+
+### 5. `recovery.after-wal-tail-truncate`
+
+| Pitanje | Odgovor |
+|---|---|
+| Koje klijentske operacije su potvrđene? | Samo one od pre prekida. |
+| Koji bajtovi su možda stigli do trajnog skladišta? | Privremeni i orphan fajlovi su obrisani uz force direktorijuma. Ako je postojao nepotpun završetak, segment je odsečen na `L` i forsiran. Nov segment još ne postoji. |
+| Koji manifest je merodavan? | Isti učitani manifest; sve tabele koje navodi su validirane (korak 4). |
+| Koji WAL zapisi se ponovo primenjuju? | U ovom startu još nijedan. Sledeći oporavak primenjuje isti skup, svaki ispravan okvir sa `sequence > flushedThroughSequence`, i ne seče ništa više. |
+| Koji fajlovi su privremeni ili orphan? | Nijedan: čišćenje je završeno. Fajl nepoznatog imena u `sst/` ostaje, jer nije dokazano privremen. |
+| Šta sme biti dvosmisleno? | Ništa novo. Kompletan okvir bez force-a iz prethodnog prekida sada je običan ispravan zapis. |
+| Koja invarijanta uspostavlja bezbednost? | I6 (`VALID` segment se ne seče ponovo), I7 (kompletan okvir se nikad ne seče), I9. |
+
+### 6. `recovery.after-wal-replay.before-ready`
+
+| Pitanje | Odgovor |
+|---|---|
+| Koje klijentske operacije su potvrđene? | Samo one od pre prekida; čvor još nije spreman. |
+| Koji bajtovi su možda stigli do trajnog skladišta? | Nov aktivni segment, kompletan i forsiran, sa samo zaglavljem. Prazni i pokriveni stari segmenti su obrisani, uz force `lsm/wal/`. Replay nije upisao ništa. |
+| Koji manifest je merodavan? | Isti učitani manifest; replay ga ne menja. |
+| Koji WAL zapisi se ponovo primenjuju? | Svi okviri sa `sequence > flushedThroughSequence` su primenjeni samo u memoriji i tu se gube. Sledeći oporavak ih primenjuje ponovo iz istih starih segmenata. |
+| Koji fajlovi su privremeni ili orphan? | Nov segment nije ni jedno ni drugo, ali je bez zapisa, pa ga sledeći oporavak briše kao prazan. Njegov ID ostaje potrošen, jer se sledeći ID računa sa diska pre čišćenja. |
+| Šta sme biti dvosmisleno? | Ništa novo. ID-jevi segmenata smeju imati praznine, ali logički sadržaj mora biti isti. |
+| Koja invarijanta uspostavlja bezbednost? | I6 (replay ne dopisuje kopije), I3 (redni brojevi se ne menjaju), I9 (nema `READY` pre koraka 15). |

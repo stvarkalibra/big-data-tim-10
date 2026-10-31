@@ -86,6 +86,7 @@ Gotovo sav kod i testovi iz Mladenovih grana nastali su u radu sa AI alatom, com
 | `matej/scenario-wal-007` | `fixtures/WalFixtureWriter` prepisan po `FORMAT.md` §3, `fixtures/VolumeFixture`, scenario CP1-WAL-007 (važeći skup segmenata 2, 5, 9 i nevažeći redosled) |
 | `matej/scenario-wal-008` | scenario CP1-WAL-008 (bootstrap `CRASH` na `recovery.*`, kontrola bez pada, dva redosleda padova), `NodeController.exitCode`, bootstrap start u `WalScenarioNode` |
 | `matej/format-final` | završna provera `FORMAT.md` prema CP1 §31.2 i kodu; objedinjene verzije formata i granice dužina |
+| `matej/dodatak-a-wal` | `docs/odbrana/dodatak-a-wal.md`: CP1 Dodatak A za šest failpoint-a WAL-a i oporavka |
 
 ### Kako je rad pregledan i proveren
 
