@@ -32,6 +32,7 @@ import rs.raf.dlsm.scenarios.Cp1Wal005;
 import rs.raf.dlsm.scenarios.Cp1Wal006;
 import rs.raf.dlsm.scenarios.Cp1Mdl002;
 import rs.raf.dlsm.scenarios.Cp1Wal007;
+import rs.raf.dlsm.scenarios.Cp1Wal008;
 
 import java.util.HashMap;
 import java.util.List;
@@ -92,6 +93,7 @@ public final class ScenarioRegistry{
         register(Cp1Wal005.ID, Cp1Wal005::run);
         register(Cp1Wal006.ID, Cp1Wal006::run);
         register(Cp1Wal007.ID, Cp1Wal007::run);
+        register(Cp1Wal008.ID, Cp1Wal008::run);
     }
 
     private ScenarioRegistry() {
