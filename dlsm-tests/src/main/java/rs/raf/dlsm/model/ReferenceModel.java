@@ -40,4 +40,18 @@ public class ReferenceModel {
     public synchronized void clear() {
         store.clear();
     }
+
+    /** An independent copy, e.g. one crash candidate (CP1 §28.3). */
+    public synchronized ReferenceModel copy() {
+        ReferenceModel copy = new ReferenceModel();
+        store.forEach(copy::put);
+        return copy;
+    }
+
+    /** Every live key with a copy of its value, in key order. */
+    public synchronized TreeMap<String, byte[]> snapshot() {
+        TreeMap<String, byte[]> snapshot = new TreeMap<>();
+        store.forEach((key, value) -> snapshot.put(key, value.clone()));
+        return snapshot;
+    }
 }

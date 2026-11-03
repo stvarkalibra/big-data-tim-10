@@ -7,8 +7,8 @@ import rs.raf.dlsm.failpoint.FailpointCatalog;
 import rs.raf.dlsm.failpoint.FailpointNames;
 import rs.raf.dlsm.failpoint.FailpointRegistry.Action;
 import rs.raf.dlsm.harness.ScenarioRegistry;
-import rs.raf.dlsm.scenarios.Mdl002Matrix.CrashRow;
-import rs.raf.dlsm.scenarios.Mdl002Matrix.Target;
+import static rs.raf.dlsm.scenarios.Mdl002Matrix.*;
+import static rs.raf.dlsm.scenarios.Mdl002Node.*;
 
 import java.util.HashMap;
 import java.util.HashSet;
