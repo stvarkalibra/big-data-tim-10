@@ -89,7 +89,7 @@ case "$COMMAND" in
     esac
     ;;
   inspect)
-    # CP1 §25: the stopped node's volume is inspected by a short-lived helper
+    # CP1 §25: the node's volume is inspected by a short-lived helper
     # container that mounts it read-only. stdout is the inspector's JSON
     # report only; the exit code is the inspector's (FORMAT.md §3.7, 64 for
     # a bad command line).
@@ -97,11 +97,23 @@ case "$COMMAND" in
       echo "$INSPECT_USAGE" >&2
       exit 64
     fi
-    if [ -n "$(docker compose --profile standalone ps -q --status running standalone)" ]; then
-      echo "The standalone node is running; stop it first: ./dbctl down" >&2
+    if [ -z "$(docker compose --profile standalone ps -q --status running standalone)" ]; then
+      exec docker compose --profile tools run --rm -T inspect "$@"
+    fi
+    # A running node is frozen for the read (docker compose pause), so nothing
+    # writes the volume meanwhile and the inspector sees one moment of it: the
+    # read-only snapshot CP1 §25 allows. It is resumed on every exit and never
+    # restarted, so no recovery or cleanup runs.
+    if ! docker compose --profile standalone pause standalone >/dev/null 2>&1; then
+      echo "Cannot pause the running standalone node for inspection" >&2
       exit 1
     fi
-    exec docker compose --profile tools run --rm -T inspect "$@"
+    trap 'docker compose --profile standalone unpause standalone >/dev/null 2>&1 ||
+      echo "standalone is still paused; run: docker compose unpause standalone" >&2' EXIT
+    trap 'exit 130' INT TERM
+    code=0
+    docker compose --profile tools run --rm -T inspect "$@" || code=$?
+    exit "$code"
     ;;
   *)
     echo "Usage: ./dbctl {build|up standalone|down|reset|status|logs|test checkpoint-1 ...|inspect manifest|wal|sstable <id>}"

@@ -1,6 +1,7 @@
 package rs.raf.dlsm.harness;
 
 import java.io.IOException;
+import java.io.PrintStream;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
@@ -52,21 +53,30 @@ public final class ScenarioRunner {
         }
 
         if (options.listOnly()) {
-            List<String> ids = ScenarioRegistry.getScenarioIds();
-            long implemented = ids.stream().filter(ScenarioRegistry::isImplemented).count();
-            System.out.println("Checkpoint-1 scenarios: " + ids.size() + " (implemented: "
-                    + implemented + ")");
-            for (String id : ids) {
-                System.out.println(ScenarioRegistry.isImplemented(id)
-                        ? id : id + "  (" + ScenarioRegistry.NOT_IMPLEMENTED + ")");
-            }
-            return EXIT_PASSED;
+            return list(System.out, System.err);
         }
 
         List<String> ids = options.caseId() != null
                 ? List.of(options.caseId())
                 : ScenarioRegistry.getScenarioIds();
         return runCases(ids, ScenarioRegistry::get, options.seed(), REPORTS_DIR);
+    }
+
+    /**
+     * {@code --list}: one implemented id per line on {@code out} and nothing
+     * else, so the list can be counted (PI §24.2, CP1 §32: exactly 33). An id
+     * without a scenario goes to {@code err}. No header: {@code docker compose
+     * run} on a terminal merges stderr into stdout, so stdout carries only ids.
+     */
+    static int list(PrintStream out, PrintStream err) {
+        for (String id : ScenarioRegistry.getScenarioIds()) {
+            if (ScenarioRegistry.isImplemented(id)) {
+                out.println(id);
+            } else {
+                err.println(id + "  (" + ScenarioRegistry.NOT_IMPLEMENTED + ")");
+            }
+        }
+        return EXIT_PASSED;
     }
 
     /**

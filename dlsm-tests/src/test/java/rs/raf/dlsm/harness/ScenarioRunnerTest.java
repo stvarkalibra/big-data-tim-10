@@ -5,6 +5,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.ByteArrayOutputStream;
+import java.io.PrintStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
@@ -88,6 +91,22 @@ class ScenarioRunnerTest {
 
         assertEquals(ScenarioRunner.DEFAULT_SEED,
                 ScenarioRunner.Options.parse(new String[] {"--list"}).seed());
+    }
+
+    @Test
+    void listPrintsExactlyTheIdsOnStdout() {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+
+        int exit = ScenarioRunner.list(new PrintStream(out, true, StandardCharsets.UTF_8),
+                new PrintStream(err, true, StandardCharsets.UTF_8));
+
+        // CP1 §32: a line count of stdout must give exactly 33, so no header.
+        List<String> lines = out.toString(StandardCharsets.UTF_8).lines().toList();
+        assertEquals(ScenarioRunner.EXIT_PASSED, exit);
+        assertEquals(33, lines.size());
+        assertEquals(ScenarioRegistry.getScenarioIds(), lines);
+        assertEquals("", err.toString(StandardCharsets.UTF_8));
     }
 
     @Test
