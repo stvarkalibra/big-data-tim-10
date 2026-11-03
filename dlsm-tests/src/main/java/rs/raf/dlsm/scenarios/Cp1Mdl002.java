@@ -43,11 +43,56 @@ import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.stream.Stream;
 
+/**
+ * CP1-MDL-002 — seeded crash and failpoint campaign (CP1 §29.6).
+ *
+ * <ol>
+ *   <li><b>Initial state:</b> an empty volume, one node with
+ *       {@code MEMTABLE_MAX_BYTES=2048}, so rotations, flushes and automatic
+ *       compactions happen on their own; 40 keys {@code mdl-00..mdl-39}.</li>
+ *   <li><b>Operations:</b> before every cycle a seeded mix of {@code PUT},
+ *       {@code DELETE}, {@code GET} and {@code SCAN} (each read checked
+ *       exactly) and now and then a successful flush or compaction. Four
+ *       phases: at least 50 crash cycles that cover every row of the
+ *       {@code CRASH} matrix ({@link Mdl002Matrix#schedule}); the eight
+ *       {@code IO_ERROR} mappings; five kinds of damage on clones of the
+ *       stopped volume; four startup protections.</li>
+ *   <li><b>Failpoint or corruption:</b> each crash cycle arms one hook with
+ *       {@code CRASH}, filtered by the request ID of its single target
+ *       (mutation, rotating mutation, scan, manual flush or manual
+ *       compaction), so only that request reaches it; recovery hooks use
+ *       bootstrap rules and crash twice in a row. Only one operation is ever
+ *       in flight.</li>
+ *   <li><b>Client outcome:</b> the target gets no response and the process
+ *       halts with 137; an {@code IO_ERROR} answers {@code 500 STORAGE_IO};
+ *       a damaged or foreign volume starts {@code FAILED}.</li>
+ *   <li><b>Logical oracle:</b> before each restart the candidates are
+ *       derived from the matrix row ({@link CandidateSet}); after it the full
+ *       {@code SCAN} and a {@code GET} of every key must equal one candidate,
+ *       which becomes the model. Every confirmed mutation is in every
+ *       candidate.</li>
+ *   <li><b>Physical / status oracle:</b> right after the crash, on disk:
+ *       the old or new {@code MANIFEST.json} as the row says, the temporary
+ *       and orphan files it must leave, and the active WAL segment unchanged,
+ *       longer by the prefix or by exactly one frame, or followed by a new
+ *       header-only segment. After recovery: no WAL frame was appended, torn
+ *       tails cut as expected, leftovers counted as removed, {@code lsm/tmp/}
+ *       empty and every table referenced. Damage and protection must give
+ *       {@code FAILED} with the expected category and never a reduced model;
+ *       the second process leaves the owner ready with unchanged files.</li>
+ *   <li><b>Proves:</b> the whole crash state machine at once (CP1 §29.6):
+ *       durability of confirmed operations, bounded ambiguity, detected
+ *       corruption, idempotent recovery and the rules of authoritative files.
+ *       Every cycle is a line in {@code reports/cp1-mdl-002-<seed>.jsonl}.
+ *       <b>Does not prove:</b> several operations in flight at a crash, which
+ *       would need a linearizability checker (CP1 §28.3).</li>
+ * </ol>
+ */
 public final class Cp1Mdl002 {
 
     public static final String ID = "CP1-MDL-002";
 
-    /** CP1 §29.6: 50 crash/restart cycles. */
+    /** CP1 §29.6: at least 50 crash/restart cycles. */
     static final int MIN_CRASH_CYCLES = 50;
     static final int KEY_SPACE = 40;
     static final String MEMTABLE_MAX_BYTES = "2048";
@@ -59,15 +104,19 @@ public final class Cp1Mdl002 {
     private static final int CLONE_PUBLIC_PORT = 18624;
     private static final int CLONE_ADMIN_PORT = 18625;
 
+    /** Below every key, and above every key, of the key space. */
     private static final String SCAN_START = "mdl";
     private static final String SCAN_END = "mdm";
     private static final int SCAN_ALL_LIMIT = 1000;
+    /** Keys read with {@code GET} after a recovery, besides the full {@code SCAN}. */
     private static final int GET_SAMPLE = 8;
     private static final int FILL_VALUE_BYTES = 256;
     private static final int MAX_FILL_PUTS = 64;
 
+    /** FORMAT.md §3: a segment header, and a frame of {@code 30 + k + v} bytes. */
     private static final int SEGMENT_HEADER_BYTES = 24;
     private static final int FRAME_OVERHEAD_BYTES = 30;
+    /** FORMAT.md §9: the file header and the block header before the first record. */
     private static final int FIRST_RECORD_OFFSET = 16 + 16;
 
     private static final Path REPORTS = Path.of("reports");
@@ -86,6 +135,7 @@ public final class Cp1Mdl002 {
     private int cycle;
     private int crashCycles;
     private String phase = "SETUP";
+    /** Monotonic, for the durations in the report only; nothing is ordered by it. */
     private final long startNanos = System.nanoTime();
     private long phaseStartNanos = startNanos;
     private final Map<String, Long> phaseMillis = new LinkedHashMap<>();
@@ -106,7 +156,7 @@ public final class Cp1Mdl002 {
         } finally {
             campaign.close();
         }
-        Path log = campaign.writeLog();
+        campaign.writeLog();
         report.pass();
     }
 
@@ -126,12 +176,14 @@ public final class Cp1Mdl002 {
                 recover(crash(row));
             }
         }
+
         enter("IO_ERROR");
         for (IoRow row : Mdl002Matrix.ioSchedule(seed)) {
             cycle++;
             workload();
             ioIteration(row);
         }
+        // A failed directory force may leave an orphan behind; a restart removes it.
         main.kill();
         recover(Crash.quiet("restart after the IO_ERROR iterations", Disk.read(main.dataDir()), model));
 
@@ -153,7 +205,9 @@ public final class Cp1Mdl002 {
         phaseStartNanos = now;
     }
 
-    /** A seeded mix (CP1 §29.6) between failures; */
+    // ===== Workload between failures =====
+
+    /** A seeded mix (CP1 §29.6) between failures; every result is checked exactly. */
     private void workload() throws Exception {
         int operations = 3 + random.nextInt(5);
         for (int i = 0; i < operations; i++) {
@@ -169,6 +223,7 @@ public final class Cp1Mdl002 {
                 checkScan();
             }
         }
+        // Now and then a successful flush or compaction between failures.
         if (random.nextInt(100) < 20) {
             boolean flush = random.nextBoolean();
             String requestId = nextId();
@@ -177,6 +232,7 @@ public final class Cp1Mdl002 {
                     "HTTP " + response.statusCode() + ": " + response.body());
         }
     }
+
     private void confirmedPut(String key, byte[] value) throws Exception {
         String requestId = nextId();
         HttpResponse<String> response = main.put(key, value, requestId);
@@ -184,6 +240,7 @@ public final class Cp1Mdl002 {
                 "HTTP " + response.statusCode() + ": " + response.body());
         model.put(key, value);
     }
+
     private void confirmedDelete(String key) throws Exception {
         String requestId = nextId();
         HttpResponse<String> response = main.delete(key, requestId);
@@ -191,6 +248,7 @@ public final class Cp1Mdl002 {
                 "HTTP " + response.statusCode() + ": " + response.body());
         model.delete(key);
     }
+
     private void checkGet(String key) throws Exception {
         String requestId = nextId();
         HttpResponse<String> response = main.get(key, requestId);
@@ -224,16 +282,23 @@ public final class Cp1Mdl002 {
     }
 
     // ===== Crash cycles =====
-    private record Crash(String hook, String target, String requestId, String key, Disk before,
-                         Disk after, CandidateSet candidates, int tornTails, Long newSegmentId,
-                         Long activeSegmentId) {
 
+    /**
+     * One crash: what was armed and sent, what the client got back ({@code none} or
+     * {@code 500 STORAGE_IO}), the disk right after it and the allowed models.
+     */
+    private record Crash(String hook, String target, String requestId, String response, String key,
+                         Disk before, Disk after, CandidateSet candidates, int tornTails,
+                         Long newSegmentId, Long activeSegmentId) {
+
+        /** A crash with nothing in flight: exactly the confirmed model survives. */
         static Crash quiet(String what, Disk disk, ReferenceModel model) {
-            return new Crash(what, "none in flight", null, null, disk, disk,
+            return new Crash(what, "none in flight", null, "none", null, disk, disk,
                     CandidateSet.exactly(model), 0, null, null);
         }
     }
 
+    /** Prepares the row's state, crashes its one target and checks the disk (CP1 §29.6). */
     private Crash crash(CrashRow row) throws Exception {
         String hook = row.hook();
         JsonNode status = quiesce(hook);
@@ -290,11 +355,16 @@ public final class Cp1Mdl002 {
             case EITHER -> CandidateSet.exactly(model).absentOrApplied(key, value);
             case APPLIED -> CandidateSet.exactly(model).applied(key, value);
         };
-        return new Crash(hook, target, requestId, key, before, after, candidates,
+        return new Crash(hook, target, requestId, "none", key, before, after, candidates,
                 row.wal() == Wal.PREFIX ? 1 : 0, newSegment, activeSegment);
     }
 
-    /** A recovery hook (CP1 §26.3)*/
+    /**
+     * A recovery hook (CP1 §26.3): the node goes down with nothing in flight,
+     * or over a torn tail for {@code recovery.after-wal-tail-truncate}; two
+     * starts with the same bootstrap rule must both halt before
+     * {@code READY}; the start without it recovers the same model.
+     */
     private void recoveryCycle(CrashRow row) throws Exception {
         String hook = row.hook();
         boolean tail = hook.equals(FailpointNames.RECOVERY_AFTER_WAL_TAIL_TRUNCATE);
@@ -337,10 +407,16 @@ public final class Cp1Mdl002 {
             log("CRASH", hook, "bootstrap start " + attempt, null, "none", first.candidates(), null, disk);
         }
         // The repair of the first start is durable: the clean start cuts nothing more.
-        recover(new Crash(first.hook() + " then " + hook, first.target(), first.requestId(), first.key(),
-                first.before(), first.after(), first.candidates(), 0, null, first.activeSegmentId()));
+        recover(new Crash(first.hook() + " then " + hook, first.target(), first.requestId(),
+                first.response(), first.key(), first.before(), first.after(), first.candidates(), 0, null,
+                first.activeSegmentId()));
     }
 
+    /**
+     * The start without failpoints after a crash: it must reach {@code READY}
+     * without appending to the WAL, clean up what the crash left, and serve
+     * exactly one candidate (CP1 §29.6).
+     */
     private void recover(Crash crash) throws Exception {
         String what = crash.hook() + ": recovery";
         main.startReady();
@@ -377,7 +453,7 @@ public final class Cp1Mdl002 {
         check(chosen.isPresent(), what, "the state " + CandidateSet.digest(observed)
                 + " matches no candidate " + crash.candidates().digests() + ": " + describe(observed));
         model = chosen.get();
-        log(phase, crash.hook(), crash.target(), crash.requestId(), "none", crash.candidates(),
+        log(phase, crash.hook(), crash.target(), crash.requestId(), crash.response(), crash.candidates(),
                 CandidateSet.digest(observed), disk);
     }
 
@@ -410,8 +486,8 @@ public final class Cp1Mdl002 {
                 CandidateSet candidates = row.mutation() == Mdl002Matrix.Mutation.EITHER
                         ? CandidateSet.exactly(model).absentOrApplied(key, value)
                         : CandidateSet.exactly(model);
-                recover(new Crash(hook + " IO_ERROR", "PUT " + key, requestId, key, before,
-                        Disk.read(main.dataDir()), candidates, row.wal() == Wal.PREFIX ? 1 : 0,
+                recover(new Crash(hook + " IO_ERROR", "PUT " + key, requestId, "500 STORAGE_IO", key,
+                        before, Disk.read(main.dataDir()), candidates, row.wal() == Wal.PREFIX ? 1 : 0,
                         null, activeSegment));
             }
             case MAINTENANCE_FAILED -> {
@@ -440,9 +516,10 @@ public final class Cp1Mdl002 {
                 JsonNode settled = main.awaitQuiet(hook + " retry");
                 check(settled.path("manifest").path("generation").asLong() > before.generation(), hook,
                         "the retry did not publish: generation still " + before.generation());
-                checkState(observe(main, hook + " after the retry", null), hook + " after the retry");
+                TreeMap<String, byte[]> afterRetry = observe(main, hook + " after the retry", null);
+                checkState(afterRetry, hook + " after the retry");
                 log(phase, hook, "flush", requestId, "500 STORAGE_IO", CandidateSet.exactly(model),
-                        null, Disk.read(main.dataDir()));
+                        CandidateSet.digest(afterRetry), Disk.read(main.dataDir()));
             }
             case MAINTENANCE_FAILED_ENGINE_FAILED -> {
                 main.arm(token, rule(hook, "IO_ERROR", requestId, 0, 1));
@@ -451,8 +528,8 @@ public final class Cp1Mdl002 {
                 main.kill();
                 Disk after = Disk.read(main.dataDir());
                 checkManifest(hook, Manifest.OLD_OR_NEW, before, after);
-                recover(new Crash(hook + " IO_ERROR", "flush", requestId, null, before, after,
-                        CandidateSet.exactly(model), 0, null, activeSegment));
+                recover(new Crash(hook + " IO_ERROR", "flush", requestId, "500 STORAGE_IO", null, before,
+                        after, CandidateSet.exactly(model), 0, null, activeSegment));
             }
         }
         ioCoverage.add(hook);
@@ -468,7 +545,11 @@ public final class Cp1Mdl002 {
                 "unexpected error envelope " + error);
     }
 
-    /** refused (CP1 §22).*/
+    /**
+     * {@code FAILED} until a restart, with a fatal error of category
+     * {@code code} or any explicit one when it is {@code null}; reads are
+     * refused (CP1 §22).
+     */
     private void expectEngineFailed(String hook, String code) throws Exception {
         JsonNode ready = main.awaitLifecycle("FAILED", hook);
         String actual = ready.path("lastFatalError").path("code").asText();
@@ -499,6 +580,11 @@ public final class Cp1Mdl002 {
 
     // ===== Damaged clones =====
 
+    /**
+     * Damage on clones of the stopped, healthy volume (CP1 §29.6): each must
+     * start {@code FAILED}, never as a smaller healthy model. The source is
+     * never touched, so it is the healthy snapshot for the next one.
+     */
     private void corruptions() throws Exception {
         JsonNode status = quiesce("corruption source");
         if (status.path("sstables").isEmpty()) {
@@ -563,7 +649,11 @@ public final class Cp1Mdl002 {
 
     // ===== Startup protection =====
 
-    /** CP1 §29.6: a second process must fail without disturbing the owner*/
+    /**
+     * CP1 §29.6: a second process must fail without disturbing the owner,
+     * and a non-empty volume without or with a foreign identity, or without
+     * its manifest, must refuse to start instead of starting empty.
+     */
     private void startupGuards() throws Exception {
         main.awaitQuiet("startup guards");
         Map<String, Long> filesBefore = listing(main.dataDir());
@@ -659,16 +749,14 @@ public final class Cp1Mdl002 {
         }
     }
 
-    private String coverageSummary() {
-        return "CRASH " + crashCoverage.size() + "/" + Mdl002Matrix.CRASH.size() + " hooks in "
-                + crashCycles + " cycles, IO_ERROR " + ioCoverage.size() + "/" + Mdl002Matrix.IO_ERROR.size()
-                + ", corruption " + corruptionCoverage.size() + "/" + Corruption.values().length
-                + ", startup guards " + guardCoverage.size() + "/" + StartupGuard.values().length
-                + "; ms per phase " + phaseMillis;
-    }
-
     // ===== Preparing a reachable state =====
 
+    /**
+     * Nothing runs in the background, fewer than four tables (so no automatic
+     * compaction is pending) and an active generation that is not full (so
+     * the target does not rotate): the disk before the target is exactly
+     * what the row compares against.
+     */
     private JsonNode quiesce(String what) throws Exception {
         for (int round = 0; round < 6; round++) {
             JsonNode status = main.awaitQuiet(what);
@@ -832,6 +920,11 @@ public final class Cp1Mdl002 {
 
     // ===== Observation =====
 
+    /**
+     * The whole key space as the node serves it: one full {@code SCAN}, and
+     * a {@code GET} of the target key and of seeded other keys, which must
+     * agree with it.
+     */
     private TreeMap<String, byte[]> observe(Mdl002Node node, String what, String targetKey)
             throws Exception {
         String scanId = nextId();

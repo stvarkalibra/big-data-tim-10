@@ -37,6 +37,9 @@ Gotovo sav kod i testovi iz Mladenovih grana nastali su u radu sa AI alatom, com
 | `mladen/status-real-parts` | status sa pravim manifestom i stanjem održavanja (`NodeStatus`), konzistentno sa pogledom mehanizma |
 | `mladen/scenario-api-001` … `mladen/scenario-api-005`, `mladen/fls-007`, `mladen/cmp-005` | scenariji CP1-API-001–005, CP1-FLS-007 i CP1-CMP-005; `NodeController.withEnvironment` |
 | `mladen/defense-notes` | `docs/odbrana/` za Mladenove scenarije i Dodatak A za pet failpoint-a mehanizma |
+| `mladen/bootstrap-config-tests` | bootstrap failpoint-i se čitaju jednako strogo kao kroz failpoint API (`ServerConfig.bootstrapFailpoints`, `Json.readArray`, `FailpointRoutes.isValidToken`): neispravan Base64, JSON ili token, dupli token i dva pravila za isti hook prekidaju pokretanje; testovi konfiguracije i okidanja tokom oporavka |
+| `mladen/http-nodelay` | `TCP_NODELAY` na prihvaćenim HTTP vezama (`HttpServerHost`) |
+| paket za Andriju (ušao kroz `andrija/cp1-mdl-002`; javadoc i izveštaj dopunjeni na `main`) | okvir kampanje CP1-MDL-002: `Cp1Mdl002`, `Mdl002Matrix` (21 `CRASH` i 8 `IO_ERROR` redova), `Mdl002Node`, `CandidateSet`, unit testovi `Cp1Mdl002Test` i `CandidateSetTest` |
 
 ### Kako je rad pregledan i proveren
 
@@ -49,10 +52,13 @@ Gotovo sav kod i testovi iz Mladenovih grana nastali su u radu sa AI alatom, com
 - **Nezavisne provere tuđeg rada.** Heks primer WAL-a iz `FORMAT.md` nezavisno je preračunat (sopstveni CRC32C); Kimijev disk reader i status rute provereni su naspram ugovora pre povezivanja. Harness i failpoint okvir pregledani su naspram PI §21.1 i §25.3; nađene greške (runner koji je pregazio neuspeh scenarija, placeholder scenario koji je uvek prolazio, nepovezane failpoint rute, `main` koji se nije kompajlirao posle dva istovremena merge-a) prijavljene su i ispravljene u posebnim granama, a izmene tuđih ugovora išle su preko protokola iz plana §5.3. Grane drugih članova proveravane su i na Windows-u, gde su nađeni testovi koji padaju samo tamo.
 - **Predlozi provereni naspram specifikacije pre koda.** AI predlog nije prihvatan samo zato što zvuči razumno: na primer, status bez mehanizma tokom oporavka je odbačen jer bi promenio tip obaveznih polja (CP1 §24), a oracle za FLS-002 je ispravljen jer je spec dozvoljavala flush posle oporavka.
 - **Odluke zapisane.** Svaki izbor koji spec ne fiksira upisan je u `docs/ODLUKE.md`.
+- **Merenje pre izmene.** Kad je CP1-MDL-001 trajao 734 s, vreme je prvo izmereno po delovima, i prva pretpostavka AI-ja (pokretanje JVM-a) pokazala se pogrešnom. Pravi uzrok, oko 40 ms po zahtevu zbog Nagle-ovog algoritma i odloženog ACK-a, potvrđen je istim scenarijem sa `-Dsun.net.httpserver.nodelay=true` kroz `JAVA_TOOL_OPTIONS` (47 s). Kod je promenjen tek posle toga.
+- **MDL-002 u Docker-u.** Kampanja je puštena sa seed-ovima 1 i 12345, a ceo skup sa `--seed 12345` daje 33/33 za oko 2,5 min. Za svaki seed proveren je i log `reports/cp1-mdl-002-<seed>.jsonl`: pokrivenost, dvosmisleni padovi razrešeni na jednog kandidata i kategorije oštećenja.
 
 ### Poznate slabosti i otvorena pitanja
 
-- **Redovi MDL-002 matrice za pet failpoint-a mehanizma** još nisu napisani; čekaju okvir kampanje MDL-002 (plan §6.5). Očekivani ishodi su već zapisani u `docs/odbrana/dodatak-a-mehanizam.md`.
+- **Redovi MDL-002 matrice.** Redovi za pet failpoint-a mehanizma slažu se sa `docs/odbrana/dodatak-a-mehanizam.md`. Redove za ostale hook-ove AI je napisao iz specifikacije, Matejevog Dodatka A i `docs/ODLUKE.md`, pa ih vlasnici (Matej, Ilija, Kimi) treba da potvrde. Kampanja ne proverava pad sa više operacija u toku, jer bi za to trebala provera linearizabilnosti (CP1 §28.3).
+- **`sun.net.httpserver.nodelay`** je svojstvo JDK implementacije: opisano je u dokumentaciji modula `jdk.httpserver`, ali nije deo standardnog API-ja. JDK koji bi ga ignorisao dao bi spore, ali i dalje ispravne odgovore.
 - **Scenariji se izvršavaju samo na Linux-u (Docker, CI).** Pravi server ne može da uradi fsync direktorijuma na Windows-u; testovi čvora na Windows-u zato koriste `WindowsSafeStorageIO`, a scenariji se pokreću kroz `./dbctl test`.
 - **`Engine.openInMemory`, `InMemoryWal` i `InMemoryFlusher`** ostaju samo za unit testove mehanizma; čvor ih ne koristi.
 - **Za potvrdu kod asistenta:** značenje `minSequence` MemTable generacije (opseg primenjenih mutacija), odbijanje čitanja posle `FAILED` i to da `/admin/v1/storage/status` vraća `503` dok mehanizam ne postoji (tokom oporavka i posle neuspelog oporavka), a dijagnostika je u `/health/ready` (`docs/ODLUKE.md`).

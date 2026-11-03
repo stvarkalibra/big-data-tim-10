@@ -12,6 +12,18 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.SortedMap;
 
+/**
+ * The complete models a crash may legally leave behind (CP1 §28.3).
+ *
+ * <p>The harness keeps at most one mutation in flight, so there are at most
+ * two candidates: the model without that mutation and the model with all of
+ * it. A partial value or a mix of two mutations is never a candidate. After
+ * recovery the exact {@code GET}/{@code SCAN} state picks the candidate that
+ * matches, and that one becomes the confirmed model again.
+ *
+ * <p>A {@code null} value stands for {@code DELETE}; an empty array is an
+ * empty value that stays present.
+ */
 public final class CandidateSet {
 
     private final List<ReferenceModel> candidates;
@@ -25,6 +37,10 @@ public final class CandidateSet {
         return new CandidateSet(List.of(confirmed.copy()));
     }
 
+    /**
+     * Every candidate with the whole mutation applied: a success response,
+     * or a failpoint that proves the WAL force finished.
+     */
     public CandidateSet applied(String key, byte[] valueOrNullForDelete) {
         List<ReferenceModel> next = new ArrayList<>();
         for (ReferenceModel candidate : candidates) {
@@ -33,6 +49,14 @@ public final class CandidateSet {
         return new CandidateSet(next);
     }
 
+    /**
+     * No response around an uncertain boundary, e.g. a complete WAL frame
+     * before its force: both the model without and the model with the whole
+     * mutation stay allowed.
+     *
+     * @throws IllegalStateException when a mutation is already in doubt; two
+     *                               of them need a history checker instead
+     */
     public CandidateSet absentOrApplied(String key, byte[] valueOrNullForDelete) {
         if (candidates.size() != 1) {
             throw new IllegalStateException(
